@@ -140,7 +140,8 @@ window; `--media` points at a folder of openly licensed films to show.
 
 The runtime is a folder like any other and the app prefers it over anything installed. `python fetch_libvlc.py`
 fetches it by hand — `--version` for another release, `--force` to replace what is there, `--lgpl-only` to leave
-out the modules that are GPLv2+ — and deleting `runtime\libvlc` puts the app back on your installed VLC. A
+out the modules that are GPLv2+, `--cache-only` to rebuild the plugin cache — and deleting `runtime\libvlc` puts
+the app back on your installed VLC. A
 `VLC_DIR` environment variable overrides all of it. In an installed build the runtime sits in
 `_internal\runtime\libvlc`, and a `runtime\libvlc` folder next to `Konus.exe` is looked at first, so a runtime you
 drop in works there too.

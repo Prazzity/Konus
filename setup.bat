@@ -94,6 +94,14 @@ echo Using the VLC in "%VLCDIR%".
 
 :vlc_ready
 
+rem libVLC reads plugins\plugins.dat at startup and cannot write it itself: without the cache
+rem every start walks the whole plugins folder. A runtime fetched before this file existed has
+rem no cache, so build one here rather than leaving the player slow forever.
+if not exist "runtime\libvlc\plugins\plugins.dat" (
+    echo Building the libVLC plugin cache ^(it is what keeps the first start quick^)...
+    ".venv\Scripts\python.exe" fetch_libvlc.py --cache-only
+)
+
 rem ---- 4. desktop shortcut (optional)
 echo.
 choice /c YN /m "Add a Konus shortcut to your desktop"
@@ -108,7 +116,6 @@ if not errorlevel 2 (
 
 echo.
 echo  Konus is ready. Start it with run.bat or the desktop shortcut.
-echo  The first start takes a few seconds longer: libVLC builds its plugin cache then.
 echo.
 echo  PyQt5 and mutagen are GPL, so what you run here is GPLv3 as a whole, while this
 echo  project's own code stays MIT.

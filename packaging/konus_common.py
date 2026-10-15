@@ -21,6 +21,14 @@ def check_runtime():
     if not (ROOT / "runtime" / "libvlc" / "libvlc.dll").is_file():
         raise SystemExit("runtime\\libvlc is missing: run `python fetch_libvlc.py` first "
                          "(or `--from <an installed VLC>` to copy one).")
+    # libVLC reads this list instead of walking the plugins folder, and that folder holds 360
+    # DLLs: a build without it comes up with the walk, which is the minute the first start used
+    # to take (see fetch_libvlc.py, whose last step writes the file).
+    if not (ROOT / "runtime" / "libvlc" / "plugins" / "plugins.dat").is_file():
+        raise SystemExit("runtime\\libvlc\\plugins\\plugins.dat is missing: without it libVLC "
+                         "walks all 360 plugins at every start — that is what made the player "
+                         "take about a minute to come up. Run `python fetch_libvlc.py "
+                         "--cache-only`, then build again.")
 
 
 def base_datas():

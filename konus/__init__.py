@@ -3,4 +3,4 @@ VLC media player interface. Nothing here is VideoLAN's."""
 
 APP_ID = "konus"
 APP_NAME = "Konus"
-__version__ = "0.4.1"
+__version__ = "0.4.2"

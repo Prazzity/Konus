@@ -68,6 +68,7 @@ STATE_DEFAULTS = {
     "profiles": {name: {} for name in DEFAULT_PROFILES},
     "volume": 80,
     "geometry": "",
+    "normal_geometry": "",  # the size the window goes back to when un-maximized (see MainWindow)
     "video_folders": [],
     "music_folders": [],
     "resume": {},          # path -> {time, length, updated}

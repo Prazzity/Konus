@@ -397,9 +397,42 @@ def video_filters(fx):
     return filters, opts
 
 
+def plugins_cache():
+    """The plugins/plugins.dat of the runtime in use, if it is there and usable. main.py points
+    libVLC at its runtime before the engine is made (see main.setup_vlc_windows), so the
+    variables this reads are set by the time anything here runs."""
+    d = os.environ.get("PYTHON_VLC_MODULE_PATH")
+    if not d:
+        return None
+    cache = os.path.join(d, "plugins.dat")
+    try:
+        with open(cache, "rb") as fh:
+            head = fh.read(16)
+        size = os.path.getsize(cache)
+    except OSError:
+        return None
+    # A cache is only worth trusting when libVLC can read something out of it: pointing it at a
+    # stub is how a run ends up with no modules at all. vlc-cache-gen leaves one that size when
+    # it is handed a relative path (see fetch_libvlc.build_cache), and any other half-written
+    # file is no better — both are treated as no cache, and the walk happens instead.
+    if head.startswith(b"cache vlc ") and size > 1024:
+        return cache
+    return None
+
+
 def instance_args(store, fx):
     s = store.get
     args = ["--no-video-title-show", "--no-osd", "--no-snapshot-preview", "--no-mouse-events", "--no-keyboard-events"]
+    # By default libVLC does two things at every start: it reads the plugin list, and it walks
+    # the plugins folder to match that list against the files on disk — 360 DLLs opened one by
+    # one just to be told nothing changed. On a machine seeing them for the first time that
+    # walk is slow (Windows inspects every DLL as it is loaded), and it is the minute the
+    # player used to take to come up. With a cache in hand the folder need not be walked: the
+    # list is taken as it stands. Without one the walk is the only way libVLC finds its
+    # plugins at all, so the flag waits for the cache — scan and cache both off is a run with
+    # no modules in it (see src/modules/bank.c).
+    if plugins_cache():
+        args.append("--no-plugins-scan")
     # diagnostics
     verbosity = {"Errors only": 0, "Warnings": 1, "Everything": 2}.get(s("log_details"), 0)
     args.append(f"--verbose={verbosity}")
@@ -703,6 +736,12 @@ class Engine(QObject):
         if once:
             self.extra_once = None
             args = args + once
+        if "--reset-plugins-cache" in args:
+            # Asked to rebuild the cache (Settings > Rescan, after new modules were dropped
+            # into the plugins folder), libVLC has to walk that folder and write what it finds.
+            # It only does that when it is told to scan: with the scan off *and* the cache off
+            # it reads nothing, finds nothing, and writes an empty cache over the good one.
+            args = [a for a in args if a != "--no-plugins-scan"] + ["--plugins-scan"]
         proxy = (self.store.get("http_proxy") or "").strip()
         if proxy:
             if "://" not in proxy:

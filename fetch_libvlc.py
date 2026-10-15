@@ -10,10 +10,20 @@ folder up by itself; an installed VLC is only used when there is no runtime.
     python fetch_libvlc.py --from "E:\\Programs\\VLC"       # copy an installed VLC (offline)
     python fetch_libvlc.py --lgpl-only                  # leave out the modules that are GPLv2+
     python fetch_libvlc.py --force                      # fetch again over what is there
+    python fetch_libvlc.py --cache-only                 # just (re)build the plugin cache
 
 The zip stays in runtime/, so a refetch, or --lgpl-only after a full fetch, needs no network.
 The runtime is LGPL-2.1-or-later apart from the modules --lgpl-only leaves out, which are
 GPLv2-or-later; COPYING.txt and AUTHORS.txt come with it.
+
+The last step is `build_cache`: plugins/plugins.dat, the list of modules libVLC reads at
+startup. libVLC only ever *reads* that file — the desktop build writes it when it installs,
+which is the one job vlc-cache-gen.exe has, and it travels in the archive for it. It matters
+more than it looks: without the file libVLC walks the plugins folder at every single start and
+opens all 360 modules to read their descriptors, and on the first start after an install that
+walk is what makes the player take a minute to come up (Windows inspects every one of those
+DLLs the first time it sees them). The cache lists the plugins that are actually in the folder,
+so it is built after --lgpl-only has had its say.
 """
 
 import argparse
@@ -42,6 +52,13 @@ TRIES = 3
 # vlc.exe, axvlc/npvlc, locale/, skins/, and it is left out.
 DIRS = ("plugins", "lua", "hrtfs")
 FILES = ("libvlc.dll", "libvlccore.dll", "COPYING.txt", "AUTHORS.txt")
+
+# vlc-cache-gen.exe is in the archive too, but it is a build tool rather than part of the
+# runtime: it is unpacked only long enough to write the cache and then dropped again, so no
+# Konus install carries it. Where the archive is not at hand (--from), an installed VLC has
+# its own copy next to vlc.exe.
+CACHE_GEN = "vlc-cache-gen.exe"
+PLUGINS_CACHE = "plugins/plugins.dat"
 
 # Every module states its own license in its descriptor, so --lgpl-only can filter on the
 # module itself instead of a list that goes stale: libVLC and most modules are LGPL-2.1+,
@@ -192,7 +209,10 @@ def copy_from(src, dest):
     for d in DIRS:
         if (src / d).is_dir():
             for f in (src / d).rglob("*"):
-                if f.is_file() and f.name != "plugins.dat":    # libVLC rebuilds its cache
+                if f.is_file() and f.name != "plugins.dat":
+                    # The source's cache is left behind and built again below: --lgpl-only
+                    # may drop modules from what was just copied, and a cache that lists a
+                    # module the folder no longer holds is worse than no cache at all.
                     out = dest / f.relative_to(src)
                     out.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(f, out)
@@ -235,6 +255,71 @@ def drop_gpl_modules(dest):
         dropped.append(lua.relative_to(dest).as_posix())
     shutil.rmtree(dest / "lua", ignore_errors=True)
     return kept, dropped
+
+
+def find_cache_gen(dest, src=None, zip_path=None):
+    """vlc-cache-gen.exe, from wherever it can be had: already unpacked, an installed VLC, or
+    the archive. Returns (path, borrowed) — a borrowed one is deleted again after the run."""
+    gen = dest / CACHE_GEN
+    if gen.is_file():
+        return gen, False
+    if src and (Path(src) / CACHE_GEN).is_file():
+        shutil.copy2(Path(src) / CACHE_GEN, gen)
+        return gen, True
+    archives = [zip_path] if zip_path else sorted(RUNTIME.glob("vlc-*-win64.zip"))
+    for archive in archives:
+        if not (archive and Path(archive).is_file()):
+            continue
+        with zipfile.ZipFile(archive) as z:
+            name = next((n for n in z.namelist() if n.endswith("/" + CACHE_GEN)), None)
+            if name is None:
+                continue
+            with z.open(name) as source, open(gen, "wb") as fh:
+                shutil.copyfileobj(source, fh, 1 << 20)
+            return gen, True
+    return None, False
+
+
+def build_cache(dest, src=None, zip_path=None):
+    """Write plugins/plugins.dat — the module list libVLC reads when it starts.
+
+    libVLC cannot write this file itself (only vlc-cache-gen.exe can), so a runtime that
+    ships without it costs every start a walk of the plugins folder: 360 DLLs opened one by
+    one to read their descriptors. On a machine that has just seen those files for the first
+    time that walk is slow — Windows inspects each DLL as it is loaded — and it is the
+    difference between the window appearing at once and a minute of nothing.
+
+    Returns True when the cache is in place.
+    """
+    plugins = dest / "plugins"
+    if not plugins.is_dir():
+        print(f"No {plugins} to build a cache from.")
+        return False
+    gen, borrowed = find_cache_gen(dest, src, zip_path)
+    if gen is None:
+        print("vlc-cache-gen.exe was not found, so no plugin cache could be built: libVLC "
+              "will walk its plugins at every start (see the top of this file).")
+        return False
+    cache = plugins / "plugins.dat"
+    cache.unlink(missing_ok=True)
+    try:
+        # The plugins folder has to be an absolute path. Given a relative one the tool exits
+        # 0 and writes an empty cache, and an empty cache is worse than none: libVLC would
+        # trust it and come up with no modules at all.
+        subprocess.run([str(gen), str(plugins.resolve())], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"vlc-cache-gen.exe could not be run ({e}).")
+    finally:
+        if borrowed:
+            gen.unlink(missing_ok=True)
+    if cache.is_file() and cache.stat().st_size > 1024:
+        print(f"Built {PLUGINS_CACHE} ({human(cache.stat().st_size)}): libVLC reads the "
+              f"module list instead of walking the plugins folder at every start.")
+        return True
+    cache.unlink(missing_ok=True)
+    print("No usable plugin cache came out of it — starting will be slow.")
+    return False
 
 
 def write_notice(dest, version, source, digest, kept, dropped):
@@ -295,10 +380,17 @@ def main():
     ap.add_argument("--lgpl-only", action="store_true",
                     help="leave out the modules that are GPLv2+ and the lua scripts")
     ap.add_argument("--force", action="store_true", help="fetch again over an existing runtime")
+    ap.add_argument("--cache-only", action="store_true",
+                    help="only (re)build plugins/plugins.dat in an existing runtime")
     ap.add_argument("--no-check", action="store_true", help="skip the load test")
     args = ap.parse_args()
 
     dest = Path(args.dest).resolve()
+    if args.cache_only:
+        if not (dest / "plugins").is_dir():
+            raise SystemExit(f"{dest} has no plugins folder — nothing to build a cache from. "
+                             f"Run without --cache-only to unpack the runtime first.")
+        return 0 if build_cache(dest) else 1
     if (dest / "libvlc.dll").is_file() and not args.force:
         print(f"{dest} is already there — nothing to do (use --force to fetch again).")
         return 0
@@ -311,7 +403,7 @@ def main():
         raise SystemExit(f"Couldn't clear {dest} ({e}). Close Konus and try again.")
     dest.mkdir(parents=True, exist_ok=True)
 
-    version, digest = None, None
+    version, digest, zip_path = None, None, None
     if args.src:
         print(f"Copying libVLC out of {args.src}")
         kept = copy_from(args.src, dest)
@@ -331,11 +423,13 @@ def main():
         print(f"Unpacking into {dest}")
         kept = extract(zip_path, dest)
 
-    (dest / "plugins" / "plugins.dat").unlink(missing_ok=True)  # libVLC writes its own
     dropped = []
     if args.lgpl_only:
         kept, dropped = drop_gpl_modules(dest)
         print(f"Left out {len(dropped)} modules that are GPLv2+ (see {dest / 'NOTICE.md'})")
+
+    # After the filtering, so the cache lists the modules the folder actually holds.
+    build_cache(dest, src=args.src, zip_path=zip_path)
 
     write_notice(dest, version, source, digest, kept, dropped)
     size = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())

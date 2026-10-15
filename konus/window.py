@@ -489,7 +489,7 @@ class MainWindow(QWidget):
         kind = "Audio" if is_audio(cur) else "Video"
         if raise_on == "Both" or raise_on == kind:
             if self.isMinimized():
-                self.showNormal()
+                self._unminimize()
             self.raise_()
         if self.store.get("osd_filename") and not is_audio(cur):
             QTimer.singleShot(400, self._show_filename)
@@ -912,7 +912,7 @@ class MainWindow(QWidget):
             pip.detach()
             pip.deleteLater()
             if self.isMinimized():
-                self.showNormal()
+                self._unminimize()
             # Ask for the focus back: the window that returns to the screen should be the one
             # the keyboard is on.
             self.raise_()
@@ -1287,6 +1287,14 @@ class MainWindow(QWidget):
     def minimize(self):
         self.showMinimized()
 
+    def _unminimize(self):
+        """Put the window back on screen keeping the state it had.
+
+        Qt's showNormal() is what brings a minimized window back, but for a maximized one it
+        leaves it screen-sized and no longer maximized: Qt's idea of the normal size is the screen
+        here (see _maximize_animated), so the restore button then has nothing to go back to."""
+        self.showMaximized() if self.isMaximized() else self.showNormal()
+
     def toggle_maximized(self):
         if self.isFullScreen():
             return
@@ -1309,6 +1317,39 @@ class MainWindow(QWidget):
 
     def _maximizing(self):
         return getattr(self, "_geo_anim", None) is not None
+
+    @staticmethod
+    def _usable_normal(r):
+        """Whether `r` can be a window a user un-maximized: a real rectangle, on a screen, and
+        not the whole screen at once.
+
+        Two kinds of rectangle are turned away and both are worse than no answer at all. The
+        screen itself is what Qt calls the normal geometry once the animated maximize has changed
+        the state at full size (see _maximize_animated) — going back to it is the restore button
+        doing nothing — and a rectangle whose middle is on no screen is one remembered from a
+        monitor that has been unplugged. A window the user resized to the whole screen by hand is
+        turned away too: that is one shape worth sacrificing for never landing on a fake one."""
+        if r is None or not r.isValid() or r.width() < 200 or r.height() < 150:
+            return False
+        for screen in QApplication.screens():
+            area = screen.availableGeometry()
+            if area.contains(r.center()):
+                return r.width() < area.width() or r.height() < area.height()
+        return False
+
+    def _normal_target(self):
+        """Where the window goes when it is un-maximized — the button, or a title bar dragged off
+        the top of the screen (see _restore_animated, _restore_for_drag).
+
+        The remembered size comes first: it is what the user last left the window at, across
+        restarts too (see _load_normal_geometry). Qt's own idea of the normal size is the fallback
+        for a window that has none yet, and a screen with a margin is the last resort — still a
+        window rather than a screen-sized one."""
+        for r in (self._normal_geo, self.normalGeometry()):
+            if self._usable_normal(r):
+                return QRect(r)
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry().adjusted(60, 60, -60, -60) if screen else QRect(self.geometry())
 
     def _anim_geometry(self, obj, target, ms, done):
         anim = QPropertyAnimation(obj, b"geometry", self)
@@ -1352,7 +1393,11 @@ class MainWindow(QWidget):
         if self.isFullScreen() or self.isMaximized() or self._maximizing():
             return
         normal = QRect(self.geometry())
-        self._normal_geo = QRect(normal)
+        # The size to come back to is what is on screen now — unless that cannot be one (see
+        # _usable_normal): the system's own restore leaves a maximized window at screen size, and
+        # that must not overwrite the size the user actually left the window at.
+        if self._usable_normal(normal):
+            self._normal_geo = QRect(normal)
         screen = self.screen() or QApplication.primaryScreen()
         target = screen.availableGeometry() if screen else normal
         # the frame and the margins of a maximized window are gone: take them off for the
@@ -1376,10 +1421,7 @@ class MainWindow(QWidget):
     def _restore_animated(self):
         if not self.isMaximized() or self._maximizing():
             return
-        target = self._normal_geo or self.normalGeometry()
-        if not target.isValid() or target.width() < 200 or target.height() < 150:
-            screen = self.screen() or QApplication.primaryScreen()
-            target = screen.availableGeometry().adjusted(60, 60, -60, -60) if screen else self.geometry()
+        target = self._normal_target()
         # Qt's idea of the normal geometry is the screen after the animated maximize above (it
         # recorded the size it was called at, and that was already the full one). Where that is
         # so, showNormal() changes nothing on screen and the state can be taken first; where Qt
@@ -1424,9 +1466,7 @@ class MainWindow(QWidget):
         normal state: not maximized, the size of the screen, and the maximize button did nothing.
         The window is placed with the title bar under the pointer, so the drag continues from
         where the user grabbed it."""
-        target = self._normal_geo or self.normalGeometry()
-        if not target.isValid() or target.width() < 200 or target.height() < 150:
-            return
+        target = self._normal_target()
         here, cursor = QRect(self.geometry()), QCursor.pos()
         g = QRect(target)
         rel = (cursor.x() - here.x()) / max(1, here.width())     # same spot along the title bar
@@ -1630,7 +1670,7 @@ class MainWindow(QWidget):
         for s in subs:
             self.engine.add_subtitle(s)
         if self.isMinimized():
-            self.showNormal()
+            self._unminimize()
         self.raise_()
         self.activateWindow()
 
@@ -2273,7 +2313,7 @@ class MainWindow(QWidget):
         if self.isVisible() and not self.isMinimized():
             self.hide()
         else:
-            self.showNormal()
+            self._unminimize()
             self.raise_()
             self.activateWindow()
 
@@ -2529,14 +2569,18 @@ class MainWindow(QWidget):
             p.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def _load_normal_geometry(self):
-        """The stored size the window returns to when un-maximized (see closeEvent)."""
-        raw = self.store.get("normal_geometry") or ""
+        """The size this window returns to when it is un-maximized, from the last session (see
+        closeEvent). The setting that remembers where the window comes up covers this size too,
+        so nothing is loaded when the user asked for it not to be."""
+        if not self.store.get("remember_geometry"):
+            return
         try:
-            x, y, w, h = (int(v) for v in str(raw).split(","))
+            x, y, w, h = (int(v) for v in str(self.store["normal_geometry"] or "").split(","))
         except ValueError:
             return
-        if w > 200 and h > 150:
-            self._normal_geo = QRect(x, y, w, h)
+        r = QRect(x, y, w, h)
+        if self._usable_normal(r):
+            self._normal_geo = r
 
     def _restore_geometry(self):
         geo = self.store["geometry"]
@@ -2552,6 +2596,7 @@ class MainWindow(QWidget):
         was showing, and the screen modes. Playback is the engine's and is not in here."""
         return {
             "geometry": QRect(self.geometry()),
+            "normal_geometry": QRect(self._normal_geo) if self._normal_geo else None,
             "visible": self.isVisible(),
             "maximized": self.isMaximized(),
             "minimized": self.isMinimized(),
@@ -2567,6 +2612,10 @@ class MainWindow(QWidget):
         """Come back as the window that was replaced (see take_state)."""
         self._state = state
         self.setGeometry(state["geometry"])
+        # the size a restore goes back to travels with the window: the rebuild is not a restart,
+        # and the new window's own Qt normal geometry is this screen-sized rectangle
+        if state.get("normal_geometry") is not None:
+            self._normal_geo = state["normal_geometry"]
         if state["mode"] == "library":
             self.library.navigate(state["location"])
             self.show_library_window()
@@ -2639,8 +2688,10 @@ class MainWindow(QWidget):
         self.store["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         # the size the window comes back to when it is un-maximized: Qt records its own only
         # when the state changes while the window is at that size, and the animated maximize
-        # changes it at full size, so Qt's copy would be the screen
-        g = self._normal_geo or self.geometry()
+        # changes it at full size, so Qt's copy would be the screen. While the window is
+        # maximized the kept size is that one; otherwise what is on screen now is the size the
+        # next session has to come back to, a resize since the last maximize included.
+        g = (self._normal_geo or self.normalGeometry()) if self.isMaximized() else self.geometry()
         self.store["normal_geometry"] = f"{g.x()},{g.y()},{g.width()},{g.height()}"
         for w in (self.toast, self.osd, self.preview, self.stats, *self.panels.values(), *self._fs_bars.values()):
             w.hide()
