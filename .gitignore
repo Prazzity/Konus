@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+design-reference/
+.venv/
+vlc_dir.txt
+runtime/
+logs/
+run*.log
+pip-install.log
+shot-*.png
+build/
+dist/

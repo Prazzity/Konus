@@ -1,0 +1,53 @@
+MIT License
+
+Copyright (c) 2026 nagasab221
+Copyright (c) 2026 the Konus contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+What this licence covers, and what it does not
+==============================================
+
+The MIT licence above covers this project's own work: the Python code, the scripts, the
+app's own mark (konus/assets/konus.svg and .ico) and the documentation.
+
+The first copyright line is the project this one grew out of — most of what is here is its
+code, and MIT asks for that notice to be kept in copies. The second covers the work done on
+top of it since. Both are under the same terms.
+
+It does not cover these, which keep their own licences:
+
+  vendor/                    python-vlc, LGPL-2.1-or-later (full text next to it,
+                             in vendor/COPYING.python-vlc)
+  konus/assets/fonts/        Inter, SIL Open Font License 1.1 (see OFL.txt there)
+  konus/assets/icons.json    the interface's icon set: "VLC Redesign" by Juxtopposed,
+                             CC BY 4.0 — see the credits in README.md
+  licenses/GPL-3.0.txt       the GNU GPLv3's own text, as published by the FSF
+
+Nothing that is fetched or installed rather than shipped (PyQt5, mutagen, the libVLC
+runtime in runtime/) is licensed here at all.
+
+Running this program means running it with PyQt5 (GPLv3) and mutagen (GPLv2-or-later), so
+a *build* of it — a bundled .exe, or the folder handed to somebody else — is a GPLv3 work as a
+whole and has to be distributed as one: with its source, with the licence text
+(licenses/GPL-3.0.txt), and with a note of what was changed. MIT is compatible with the
+GPLv3, so nothing here needs relicensing for that; it only means the combined work cannot
+be distributed under anything more restrictive.

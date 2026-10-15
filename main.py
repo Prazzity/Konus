@@ -1,0 +1,210 @@
+"""Entry point: python main.py [files, folders or URLs...]
+
+The packaged build (`packaging/`) runs this same file with the data files — the assets, the
+licences and the libVLC runtime — inside the bundle.
+"""
+
+import json
+import os
+import shutil
+import sys
+import warnings
+
+if getattr(sys, "frozen", False):
+    # Frozen build: the bundle holds the data files, and the executable's own folder is
+    # looked at first, so a runtime dropped in there by hand still wins.
+    EXE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    HERE = getattr(sys, "_MEIPASS", EXE_DIR)
+else:
+    HERE = EXE_DIR = os.path.dirname(os.path.abspath(__file__))
+VENDOR_DIRS = [os.path.join(EXE_DIR, "vendor"), os.path.join(HERE, "vendor")]
+for _d in reversed(VENDOR_DIRS):
+    if os.path.isdir(_d):
+        sys.path.insert(0, _d)                     # bundled python-vlc binding
+sys.path.insert(0, HERE)
+# The bundled python-vlc has docstrings Python 3.12 warns about the first time it compiles them.
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+
+# os.add_dll_directory() handles; keep them alive for the whole run.
+_VLC_DLL_DIRS = []
+
+
+def find_vlc_dir():
+    """The folder that holds libvlc.dll. Looked up in $VLC_DIR, the runtime fetched next to
+    main.py (fetch_libvlc.py fills runtime/libvlc), a vlc_dir.txt written next to main.py
+    (setup.bat writes it), the registry, then the usual folders."""
+    for var in ("VLC_DIR",):
+        p = os.environ.get(var)
+        if p and os.path.isfile(os.path.join(p, "libvlc.dll")):
+            return p
+    for base in (EXE_DIR, HERE):
+        bundled = os.path.join(base, "runtime", "libvlc")
+        if os.path.isfile(os.path.join(bundled, "libvlc.dll")):
+            return bundled
+    for base in (EXE_DIR, HERE):
+        f = os.path.join(base, "vlc_dir.txt")
+        if not os.path.isfile(f):
+            continue
+        try:
+            with open(f, encoding="utf-8-sig") as fh:
+                p = fh.read().strip().strip('"')
+            if p and os.path.isfile(os.path.join(p, "libvlc.dll")):
+                return p
+        except OSError:
+            pass
+    try:
+        import winreg
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, r"Software\VideoLAN\VLC") as k:
+                    p = winreg.QueryValueEx(k, "InstallDir")[0]
+                if p and os.path.isfile(os.path.join(p, "libvlc.dll")):
+                    return p
+            except OSError:
+                pass
+    except ImportError:
+        pass
+    cands = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        if os.environ.get(var):
+            cands.append(os.path.join(os.environ[var], "VideoLAN", "VLC"))
+    w = shutil.which("vlc") or shutil.which("vlc.exe")
+    if w:
+        cands.append(os.path.dirname(w))
+    for c in cands:
+        if os.path.isfile(os.path.join(c, "libvlc.dll")):
+            return c
+    return None
+
+
+def setup_vlc_windows():
+    """Point the bundled python-vlc at libvlc.dll before it gets imported."""
+    d = find_vlc_dir()
+    if not d:
+        return
+    os.environ.setdefault("PYTHON_VLC_LIB_PATH", os.path.join(d, "libvlc.dll"))
+    plugins = os.path.join(d, "plugins")
+    if os.path.isdir(plugins):
+        os.environ.setdefault("PYTHON_VLC_MODULE_PATH", plugins)
+    try:
+        _VLC_DLL_DIRS.append(os.add_dll_directory(d))
+    except (AttributeError, OSError):
+        pass
+
+
+def load_vlc_binding():
+    """Load the bundled python-vlc from vendor/vlc.py, so the binding stays one plain file
+    that can be replaced on its own (LGPL) in a packaged build too. Without that file the
+    ordinary `import vlc` is left to do its work."""
+    for d in VENDOR_DIRS:
+        path = os.path.join(d, "vlc.py")
+        if os.path.isfile(path):
+            break
+    else:
+        return
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vlc", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["vlc"] = module
+    spec.loader.exec_module(module)
+
+
+def main():
+    setup_vlc_windows()
+    load_vlc_binding()
+
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtNetwork import QLocalServer, QLocalSocket
+    from PyQt5.QtWidgets import QApplication
+
+    from konus import APP_ID, APP_NAME
+
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # argv[0] is the app id, and the arguments after it are ours: Qt takes its own switches out
+    # of the list it is given, while sys.argv stays as the caller passed it, for the files below.
+    app = QApplication([APP_ID] + sys.argv[1:])
+    app.setApplicationName(APP_ID)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setQuitOnLastWindowClosed(False)
+
+    from konus.store import Store
+    store = Store()
+
+    args = sys.argv[1:]
+    uid = os.environ.get("USERNAME") or "user"
+    server_name = f"{APP_ID}-{uid}"
+    single = store.get("single_window") and (store.get("single_from_fm") or not args)
+
+    # Single instance: hand the arguments to a running window, if there is one.
+    if single:
+        sock = QLocalSocket()
+        sock.connectToServer(server_name)
+        if sock.waitForConnected(300):
+            sock.write(json.dumps([os.path.abspath(a) if os.path.exists(a) else a for a in args]).encode())
+            sock.waitForBytesWritten(1000)
+            sock.disconnectFromServer()
+            return 0
+
+    from konus import i18n, theme
+    i18n.set_language(store.get("language"))
+    theme.load_fonts()
+    from konus import ui
+    app.setStyle(ui.Style("Fusion"))
+    theme.apply(store.get("theme"), store.get("accent"))
+    app.setFont(theme.font(14))
+
+    from konus.engine import Engine
+    from konus.window import MainWindow
+
+    engine = Engine(store)
+    win = MainWindow(engine, store)
+
+    server = None
+    if store.get("single_window"):
+        server = QLocalServer()
+        QLocalServer.removeServer(server_name)
+        server.listen(server_name)
+
+        def incoming():
+            while server.hasPendingConnections():
+                conn = server.nextPendingConnection()
+                buf = bytearray()
+
+                def on_ready(c=conn, b=buf):
+                    b.extend(bytes(c.readAll()))
+
+                def on_done(c=conn, b=buf):
+                    b.extend(bytes(c.readAll()))
+                    try:
+                        items = json.loads(b.decode() or "[]")
+                    except ValueError:
+                        items = []
+                    win.handle_args(items)
+                    c.deleteLater()
+
+                conn.readyRead.connect(on_ready)
+                conn.disconnected.connect(on_done)
+                if conn.state() == QLocalSocket.UnconnectedState:
+                    on_done()
+
+        server.newConnection.connect(incoming)
+
+    if store.get("start_in_tray") and win.tray is not None and win.tray.isVisible():
+        pass
+    else:
+        win.show()
+    if not store["onboarded"]:
+        from konus.onboarding import Onboarding
+        Onboarding(win).exec_()
+        store.save()
+    if args:
+        win.handle_args(args)
+    code = app.exec_()
+    if server is not None:
+        server.close()
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
