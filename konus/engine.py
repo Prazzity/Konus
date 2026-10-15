@@ -31,10 +31,10 @@ from PyQt5.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 import vlc
 
-from . import APP_ID, APP_NAME, __version__, prefs
+from . import APP_ID, APP_NAME, __version__, portable, prefs
 from . import diag
 from .i18n import tr
-from .store import CACHE_DIR
+from .store import cache_dir
 
 VIDEO_EXT = {
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "m2ts", "mts",
@@ -135,7 +135,7 @@ SUB_STYLE_FX = {"sub_font", "sub_color", "sub_outline_color", "size_mode", "sub_
                 "outline_px", "bg_opacity", "sub_offset"}
 STYLED_SUBS = {"ssa "}                                                  # drawn by libass in the file's style
 PICTURE_SUBS = {"spu ", "bdpg", "dvbs", "cvd ", "ogt ", "xsub", "scte"}  # DVD / Blu-ray / DVB bitmaps
-PLAIN_SUBS = CACHE_DIR / "plain-subs"
+PLAIN_SUBS = cache_dir() / "plain-subs"
 
 
 def plain_srt(text):
@@ -433,11 +433,17 @@ def instance_args(store, fx):
     # no modules in it (see src/modules/bank.c).
     if plugins_cache():
         args.append("--no-plugins-scan")
+    if portable.is_portable():
+        # A portable player does not write a configuration: on Windows libVLC otherwise keeps a
+        # vlcrc beside the running executable (see konus.portable) — inside the bundle, or in
+        # the AppData a portable player is not supposed to touch. Nothing here relies on it:
+        # every option the player uses is passed with the instance (this list).
+        args.append("--no-config")
     # diagnostics
     verbosity = {"Errors only": 0, "Warnings": 1, "Everything": 2}.get(s("log_details"), 0)
     args.append(f"--verbose={verbosity}")
     if s("save_log"):
-        log = s("log_file") or str(CACHE_DIR / "konus-log.txt")
+        log = s("log_file") or portable.log_path() or str(cache_dir() / "konus-log.txt")
         try:
             Path(log).parent.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -1569,7 +1575,7 @@ class Engine(QObject):
             pass
         if actual and actual != target:
             try:
-                with open(CACHE_DIR / "audio-log.txt", "a", encoding="utf-8") as f:
+                with open(cache_dir() / "audio-log.txt", "a", encoding="utf-8") as f:
                     f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} stream on {actual}, moved to {target}\n")
             except OSError:
                 pass
@@ -1586,7 +1592,7 @@ class Engine(QObject):
 
     def test_stereo(self):
         """Play a short tone in the left, then the right channel through the current setup."""
-        path = CACHE_DIR / "stereo-test.wav"
+        path = cache_dir() / "stereo-test.wav"
         if not path.exists():
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)

@@ -633,6 +633,10 @@ TABLE = {
         "Записывать сообщения libVLC в файл журнала. Полезно, когда файл не воспроизводится.",
     "Where the log is written. Empty means %LOCALAPPDATA%\\konus\\konus-log.txt.":
         "Куда писать журнал. Пусто — «%LOCALAPPDATA%\\konus\\konus-log.txt».",
+    # The portable build keeps its files beside the executable, so the sentence names a
+    # different path there (konus.portable.log_path) and needs a row of its own.
+    "Where the log is written. Empty means {}.":
+        "Куда писать журнал. Пусто — «{}».",
     "How much libVLC writes to the log.": "Насколько подробно libVLC пишет в журнал.",
     "Also show notices for problems that don't stop playback.":
         "Показывать сообщения и о проблемах, не прерывающих воспроизведение.",

@@ -23,10 +23,12 @@ nothing written outside your own user folder. It adds a Konus entry to the Start
 on the desktop. To remove it, use Settings → Apps → Konus — the uninstaller asks whether to delete your settings
 and library too.
 
-**The portable one** — `Konus-<version>-portable.exe`. The same player in one 95 MB file: drop it on a USB stick,
-in your Downloads folder, anywhere, and double-click it. It unpacks itself into a temporary folder on every start
-and clears it when you close the window, so the first window takes a few seconds longer to appear. Delete the file
-and it is gone.
+**The portable one** — `Konus-<version>-portable.zip`, about 60 MB. Unzip it anywhere — a USB stick, your
+Downloads folder, a folder on a work laptop — and run `Konus-portable.exe` from inside. It needs nothing installed
+and writes nothing outside its own folder: settings, library, playlists, watch positions and the cache all live in
+`data\` next to the program, so the folder travels with you exactly as it is, and copying it to another machine
+brings your library along. Deleting the folder removes every trace. Nothing is unpacked at every start, so the
+player comes up as fast as the installed one.
 
 Both are unsigned, so SmartScreen may warn once — *More info* → *Run anyway*. Windows 10 or 11, 64-bit.
 
@@ -115,14 +117,23 @@ This makes all three, and puts the two files a release needs in `dist\release\`:
 1. `packaging\konus.spec` → `dist\Konus`: `Konus.exe` with PyQt5, the assets and the libVLC runtime inside. It
    needs `runtime\libvlc`, so run `python fetch_libvlc.py` once first (or `--from "C:\Program Files\VideoLAN\VLC"`
    to copy an installed VLC instead of downloading).
-2. `packaging\konus-portable.spec` → `dist\release\Konus-<version>-portable.exe`, the single file, with the
-   licence texts and the python-vlc binding carried inside it.
-3. `packaging\konus.iss` (Inno Setup) → `dist\release\Konus-<version>-setup.exe`.
+2. `packaging\konus-portable.spec` → `dist\Konus-portable`, the portable folder: `Konus-portable.exe` with the
+   licence texts and the python-vlc binding carried inside it, and a `data` folder beside it for everything the
+   player writes. It is zipped into `dist\release\Konus-<version>-portable.zip` and the folder inside the zip
+   carries the version, so an unzipped build next to an older one reads as what it is.
+3. `packaging\konus.iss` (Inno Setup) → `dist\release\Konus-<version>-setup.exe`. The installer packs the folder
+   build, and that one keeps its settings where it always did, in `%APPDATA%\konus` — only the portable build
+   lives out of its own folder (see `konus\portable.py`).
 
 Both tools have to be installed: `pip install pyinstaller` and `winget install JRSoftware.InnoSetup`. What goes
 into a bundle and what is left out is decided once, in `packaging\konus_common.py`. The version comes from
 `konus\__init__.py` and reaches the About box, both executables' file properties and the installer's name from
 there. `--without-portable`, `--without-installer` and `--installer-only` cut the run down to one part.
+
+`KONUS_DATA_DIR` in the environment sends any run's settings and cache to the folder it names instead, which is
+how the screenshot tool and anything else that starts the app keep out of your own settings. A run that starts
+with its own data folder also gets its own single-window slot, so it can sit next to a player that is already
+open instead of handing its files to it.
 
 The README screenshots come from `tools/make_screenshots.py`, which runs the app for real and photographs its
 window; `--media` points at a folder of openly licensed films to show.
@@ -148,9 +159,12 @@ drop in works there too.
 
 ### Updating, uninstalling
 
-An installed build is updated by running the newer installer over it; the portable file by saving the newer one
-over the old one. From a folder, copy the new version over it (or `git pull`) and leave `runtime\libvlc` and
+An installed build is updated by running the newer installer over it; a portable one by unzipping the newer build
+and copying `data\` across, or simply by replacing the old folder and keeping the newer one's `data\`. From a
+folder, copy the new version over it (or `git pull`) and leave `runtime\libvlc` and
 `.venv` where they are — if `requirements.txt` changed, `setup.bat` installs the difference in a few seconds.
 
 Uninstalling keeps your settings, library and playlists in `%APPDATA%\konus` (the cache in `%LOCALAPPDATA%\konus`)
-unless you tell the uninstaller to delete them; delete those two folders by hand and nothing is left.
+unless you tell the uninstaller to delete them; delete those two folders by hand and nothing is left. A portable
+build has nothing to uninstall: its `data` folder is the whole of it, and deleting the folder is the whole of
+deleting it.

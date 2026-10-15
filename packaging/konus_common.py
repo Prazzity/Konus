@@ -1,9 +1,9 @@
-"""What the two release builds share: the paths, what goes into a bundle, what is left out,
-and the version resource Konus.exe carries.
+"""What the release builds share: the paths, what goes into a bundle, what is left out, and the
+version resource the executables carry.
 
-`konus.spec` (the folder build, which the installer packs) and `konus-portable.spec` (the
-single-file build) are then only about the shape of their output. Keeping the rules here is
-what keeps the two in step: something new the app needs is one edit, not two.
+`konus.spec` (the folder build the installer packs), `konus-portable.spec` (the portable
+folder) and the installer itself are then only about the shape of their output. Keeping the
+rules here is what keeps the builds in step: something new the app needs is one edit, not two.
 """
 
 import re
@@ -40,10 +40,10 @@ def base_datas():
 
 
 def portable_datas():
-    """And what only the single-file build carries *inside* itself, because it has no folder
-    beside it to hold these: the python-vlc binding — which stays a plain file main.py loads,
-    so a build keeps it replaceable — and the licence texts a build is obliged to travel with.
-    The folder build gets the same files from tools\\build_installer.py, put next to the
+    """And what only the portable build carries *inside* itself, because it has no installer to
+    put them beside the executable: the python-vlc binding — which stays a plain file main.py
+    loads, so a build keeps it replaceable — and the licence texts a build is obliged to travel
+    with. The folder build gets the same files from tools\\build_installer.py, put next to the
     executable where they can be read without unpacking anything."""
     return base_datas() + [
         (str(ROOT / "vendor" / "vlc.py"), "vendor"),

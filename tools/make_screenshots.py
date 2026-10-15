@@ -38,8 +38,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
 SCRATCH = Path(os.environ.get("KONUS_SHOTS_CONFIG") or Path(tempfile.gettempdir()) / "konus-shots")
-os.environ["APPDATA"] = str(SCRATCH / "Roaming")
-os.environ["LOCALAPPDATA"] = str(SCRATCH / "Local")
+# run the app out of a scratch folder instead of the real one, so photographing it never
+# touches the settings, the library or the cache of whoever runs this (see konus.portable)
+os.environ["KONUS_DATA_DIR"] = str(SCRATCH)
 
 from PyQt5.QtCore import QEvent, QPointF, Qt, QTimer                      # noqa: E402
 from PyQt5.QtGui import QGuiApplication, QMouseEvent                     # noqa: E402

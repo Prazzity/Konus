@@ -1,4 +1,4 @@
-"""Build what people download: the folder build, the single-file build, and the installer that
+"""Build what people download: the folder build, the portable folder, and the installer that
 packs the first of them.
 
     .venv\\Scripts\\python.exe tools\\build_installer.py
@@ -9,9 +9,11 @@ that go into a release:
 1. PyInstaller reads packaging\\konus.spec and writes dist\\Konus: Konus.exe plus everything it
    runs on (PyQt5, the assets, the libVLC runtime from runtime\\libvlc — run
    `python fetch_libvlc.py` once if that folder is not there).
-2. PyInstaller reads packaging\\konus-portable.spec and writes
-   dist\\release\\Konus-<version>-portable.exe: the same program in one file, no installation,
-   nothing beside it. It carries the python-vlc binding and the licence texts inside instead.
+2. PyInstaller reads packaging\\konus-portable.spec and writes dist\\Konus-portable: the same
+   program with a `data` folder beside it, which is where it keeps everything it writes — the
+   settings, the library, the cache, the log. Zipped into
+   dist\\release\\Konus-<version>-portable.zip, this is the one to carry on a stick: unzip it
+   anywhere, run Konus-portable.exe, take the folder with you when you go.
 3. What the folder build has to carry *beside* the executable goes next to it: the binding as
    the plain file main.py loads (LGPL — it stays replaceable), and the licence texts.
 4. Inno Setup compiles packaging\\konus.iss out of dist\\Konus into
@@ -21,7 +23,7 @@ that go into a release:
 
 Needs PyInstaller where it runs (pip install pyinstaller) and Inno Setup 6 for the last step
 (winget install JRSoftware.InnoSetup). The switches skip a part of it: --without-installer,
---without-portable (the slow half), --installer-only.
+--without-portable, --installer-only.
 """
 
 import argparse
@@ -30,10 +32,12 @@ import re
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist" / "Konus"
+PORTABLE = ROOT / "dist" / "Konus-portable"
 RELEASE = ROOT / "dist" / "release"
 
 # What is copied beside the executable by step 3: source -> where it lands in dist\Konus.
@@ -84,8 +88,36 @@ def build_folder():
         print(f"copied {src.relative_to(ROOT)} -> dist/Konus/{dest}")
 
 
-def build_portable():
-    pyinstaller("konus-portable.spec", RELEASE)
+def build_portable(version):
+    """The portable folder, and the zip of it that goes into a release.
+
+    The folder is built as dist\\Konus-portable and then carries the version in its name, so an
+    unzipped one next to an older one reads as what it is. The zip holds the folder itself (not
+    its contents loose), which is what keeps unzipping from mixing a new build into an old
+    folder and taking the settings and the library in `data` along with it."""
+    pyinstaller("konus-portable.spec", ROOT / "dist")
+    if not (PORTABLE / "Konus-portable.exe").is_file():
+        raise SystemExit("the portable build did not come out where it was expected: "
+                         f"{(PORTABLE / 'Konus-portable.exe')}")
+    named = PORTABLE.with_name(f"Konus-{version}-portable")
+    if named.exists():
+        shutil.rmtree(named)
+    PORTABLE.rename(named)
+    release_zip(named, RELEASE / f"Konus-{version}-portable.zip")
+
+
+def release_zip(folder, target):
+    """Zip a built folder for the release page, print what it is made of. DEFLATE at level 6:
+    the bundle's DLLs compress by half and the whole thing is written once, so the tar-time is
+    not worth a level 9 nobody unpacks twice."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for path in sorted(folder.rglob("*")):
+            if path.is_file():
+                z.write(path, path.relative_to(folder.parent))
+                total += path.stat().st_size
+    print(f"zipped {folder.name}  ({total / 1e6:.0f} MB -> {target.stat().st_size / 1e6:.0f} MB)")
 
 
 def find_iscc():
@@ -114,19 +146,24 @@ def report(version):
     if (DIST / "Konus.exe").is_file():
         size = sum(f.stat().st_size for f in DIST.rglob("*") if f.is_file())
         print(f"folder:    dist\\Konus\\Konus.exe  ({size / 1e6:.0f} MB, runs as it is)")
-    for name in (f"Konus-{version}-portable.exe", f"Konus-{version}-setup.exe"):
+    folder = ROOT / "dist" / f"Konus-{version}-portable"
+    if (folder / "Konus-portable.exe").is_file():
+        size = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+        print(f"portable:  dist\\{folder.name}\\Konus-portable.exe  ({size / 1e6:.0f} MB, "
+              "settings and library beside it in data\\)")
+    for name in (f"Konus-{version}-portable.zip", f"Konus-{version}-setup.exe"):
         path = RELEASE / name
         if path.is_file():
-            kind = "portable:" if "portable" in name else "installer:"
+            kind = "release:  " if name.endswith(".zip") else "installer:"
             print(f"{kind:11} dist\\release\\{name}  ({path.stat().st_size / 1e6:.0f} MB)")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--without-installer", action="store_true",
-                    help="the folder and the single-file build, no Inno Setup")
+                    help="the folder and the portable build, no Inno Setup")
     ap.add_argument("--without-portable", action="store_true",
-                    help="skip the single-file build (it is the slow half)")
+                    help="skip the portable build and its zip (it is the slow half)")
     ap.add_argument("--installer-only", action="store_true",
                     help="only compile the installer from the dist\\Konus already there")
     args = ap.parse_args()
@@ -139,7 +176,7 @@ def main():
     else:
         build_folder()
         if not args.without_portable:
-            build_portable()
+            build_portable(version)
         if not args.without_installer:
             build_installer(version)
     report(version)

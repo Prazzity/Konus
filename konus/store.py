@@ -14,13 +14,28 @@ from pathlib import Path
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
-from . import APP_ID, prefs
+from . import APP_ID, prefs, portable
 
 _base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
 _cache = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
 
-CONFIG_DIR = _base / APP_ID
-CACHE_DIR = _cache / APP_ID
+
+def config_dir():
+    """Where the settings and the library live: `data` next to the executable in a portable
+    build, %APPDATA%\\konus otherwise (see konus.portable).
+
+    Asked for rather than kept in a name, because the answer is only there once the player has
+    started: a portable one decides on its data folder at that moment."""
+    data = portable.data_dir()
+    return (data / "config") if data is not None else (_base / APP_ID)
+
+
+def cache_dir():
+    """Where the thumbnails, previews, waveforms and logs live: inside the same `data` folder
+    in a portable build, %LOCALAPPDATA%\\konus otherwise."""
+    data = portable.data_dir()
+    return (data / "cache") if data is not None else (_cache / APP_ID)
+
 
 # The app answered to another name before this one, and that is where an older build left its
 # settings and its cache. A rename should not look like a fresh install, so they are moved over
@@ -29,7 +44,9 @@ LEGACY_ID = "vlc-redesign"
 
 
 def _adopt_legacy():
-    for old, new in ((_base / LEGACY_ID, CONFIG_DIR), (_cache / LEGACY_ID, CACHE_DIR)):
+    if portable.is_portable():
+        return            # a portable player starts in its own folder, with nothing to adopt
+    for old, new in ((_base / LEGACY_ID, config_dir()), (_cache / LEGACY_ID, cache_dir())):
         if old.is_dir() and not new.exists():
             try:
                 old.rename(new)
@@ -127,7 +144,7 @@ class Store(QObject):
 
     def __init__(self):
         super().__init__()
-        self.path = CONFIG_DIR / "config.json"
+        self.path = config_dir() / "config.json"
         self.data = copy.deepcopy(STATE_DEFAULTS)
         self._newer = 0
         self._foreign = False             # the file belongs to a newer player: do not write it
@@ -277,7 +294,7 @@ class Store(QObject):
             # the whole point, so this session's changes stay in memory
             return
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            config_dir().mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=1)

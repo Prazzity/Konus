@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout, QL
 
 from . import icons, prefs, sysutil, theme
 from .i18n import tr, tr_opts
-from .store import CONFIG_DIR
+from .store import config_dir
 from .theme import ACCENTS, c
 from .widgets import (Button, ColorField, Dropdown, Expander, HLine, IconButton, InfoIcon, Label, NumberField,
                       Segmented, Slider, StartVolume, Toggle, VSlider, elide, paint_shadow)
@@ -541,7 +541,7 @@ class SettingsDialog(QDialog):
     def _button(self, key):
         w = self.win
         if key == "open_config":
-            sysutil.open_path(CONFIG_DIR)
+            sysutil.open_path(config_dir())
         elif key == "reset_all":
             if w.confirm(tr("Reset all settings?"),
                          tr("Every setting of the “{profile}” profile goes back to its default. "

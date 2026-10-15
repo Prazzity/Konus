@@ -11,6 +11,8 @@ shown in their info tip.
 
 from pathlib import Path
 
+from . import portable
+
 HOME = str(Path.home())
 
 
@@ -106,7 +108,8 @@ CATEGORIES = [
             Row("save_log", "Save a log", "toggle", True, apply="instance",
                 info="Write libVLC's messages to a log file. Useful when a file won't play."),
             Row("log_file", "Log file", "path", "", apply="instance", mode="save",
-                info="Where the log is written. Empty means %LOCALAPPDATA%\\konus\\konus-log.txt."),
+                info="Where the log is written. Empty means {}.".format(
+                    portable.log_path() or r"%LOCALAPPDATA%\konus\konus-log.txt")),
             Row("log_details", "Log details", "dropdown", "Errors only", options=["Errors only", "Warnings", "Everything"],
                 apply="instance", info="How much libVLC writes to the log."),
         ]),

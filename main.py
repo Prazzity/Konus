@@ -1,7 +1,10 @@
 """Entry point: python main.py [files, folders or URLs...]
 
 The packaged build (`packaging/`) runs this same file with the data files — the assets, the
-licences and the libVLC runtime — inside the bundle.
+licences and the libVLC runtime — inside the bundle. The portable build is the same program
+with `konus/_portable.py` in the bundle: from that flag on, everything the player writes —
+settings, library, cache, log — goes into a `data` folder beside the executable (see
+konus.portable).
 """
 
 import json
@@ -24,6 +27,12 @@ for _d in reversed(VENDOR_DIRS):
 sys.path.insert(0, HERE)
 # The bundled python-vlc has docstrings Python 3.12 warns about the first time it compiles them.
 warnings.filterwarnings("ignore", category=SyntaxWarning)
+
+from konus import portable  # noqa: E402  (after sys.path, before anything reads a path)
+
+# The portable build settles on its data folder — creating it, or deciding it cannot and
+# falling back to AppData — before anything else can ask where its files go.
+portable.setup()
 
 # os.add_dll_directory() handles; keep them alive for the whole run.
 _VLC_DLL_DIRS = []
@@ -86,6 +95,13 @@ def setup_vlc_windows():
     plugins = os.path.join(d, "plugins")
     if os.path.isdir(plugins):
         os.environ.setdefault("PYTHON_VLC_MODULE_PATH", plugins)
+    # The portable build keeps libVLC's own configuration in its data folder as well (see
+    # konus.portable): on Windows libVLC otherwise falls back to the running executable's
+    # folder for vlcrc, which in a bundle is among the unpacked files. Installed builds and
+    # the source tree are left exactly as they were.
+    config = portable.vlc_config_path()
+    if config:
+        os.environ["VLC_CONFIG_PATH"] = config
     try:
         _VLC_DLL_DIRS.append(os.add_dll_directory(d))
     except (AttributeError, OSError):

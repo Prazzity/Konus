@@ -1,7 +1,8 @@
 r"""Background media services: thumbnails, tags, durations, cover art, waveforms,
-subtitle cue times and seek-preview frames. Everything is cached under
-%LOCALAPPDATA%\konus and produced on a thread pool; widgets ask, get None the first
-time, and repaint when the matching *Ready signal arrives.
+subtitle cue times and seek-preview frames. Everything is cached under the player's cache
+folder — %LOCALAPPDATA%\konus, or the portable build's own data folder — and produced on a
+thread pool; widgets ask, get None the first time, and repaint when the matching *Ready
+signal arrives.
 """
 
 import hashlib
@@ -20,7 +21,7 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 
 from .engine import AUDIO_EXT, SUB_EXT, VIDEO_EXT, ext, is_url, media_in_dir
-from .store import CACHE_DIR
+from .store import cache_dir
 
 try:
     import mutagen
@@ -29,10 +30,10 @@ except ImportError:          # tags fall back to ffprobe
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-THUMBS = CACHE_DIR / "thumbs"
-COVERS = CACHE_DIR / "covers"
-WAVES = CACHE_DIR / "waves"
-PREVIEWS = CACHE_DIR / "previews"
+THUMBS = cache_dir() / "thumbs"
+COVERS = cache_dir() / "covers"
+WAVES = cache_dir() / "waves"
+PREVIEWS = cache_dir() / "previews"
 
 
 def _make_cache_dirs():
@@ -105,7 +106,7 @@ class MediaService(QObject):
         self._lock = threading.Lock()
         self._pending = set()
         self._pix = OrderedDict()          # (path, w, h) -> QPixmap
-        self._info_path = CACHE_DIR / "info.json"
+        self._info_path = cache_dir() / "info.json"
         try:
             self._info = json.loads(self._info_path.read_text())
         except (OSError, ValueError):
