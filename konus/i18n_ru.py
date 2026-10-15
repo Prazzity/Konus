@@ -536,6 +536,14 @@ TABLE = {
     "Pass compressed audio to the receiver": "Передавать сжатый звук на ресивер",
     "Detect Dolby Surround": "Определять Dolby Surround",
     "Resampling quality": "Качество передискретизации",
+    "The converter between the file's sample rate and the sound device's — and the "
+    "thing that keeps the sound in step when the playback speed changes. Fast is the "
+    "plain converter, Balanced and Best the sinc one (medium and best quality), which "
+    "is the one that holds up under a speed change.":
+        "Преобразователь между частотой дискретизации файла и звукового устройства — и то, что "
+        "удерживает звук синхронным при смене скорости воспроизведения. «Быстро» — простой "
+        "преобразователь, «Сбалансированно» и «Лучшее» — sinc (среднее и максимальное качество), "
+        "который смену скорости и выдерживает.",
     "Media role": "Назначение звука",
     "Visualization size": "Размер визуализации",
     "Enable subtitles": "Включить субтитры",
@@ -608,6 +616,10 @@ TABLE = {
 
     # ------------------------------------------------- settings: row explanations
     "The language of menus and dialogs.": "Язык меню и диалогов.",
+    "The language of menus and dialogs. Switching takes effect at once — the "
+    "interface is built again where it stands and playback carries on.":
+        "Язык меню и диалогов. Переключение действует сразу: интерфейс перестраивается на месте, "
+        "воспроизведение продолжается.",
     "Dark or light interface. System follows your desktop theme.":
         "Тёмный или светлый интерфейс. «Системная» следует теме рабочего стола.",
     "The highlight colour used for the play button, seek bar and active icons.":
@@ -1187,10 +1199,10 @@ TABLE = {
     "group:Media": "Медиа",
     "group:System": "Система",
 
-    # ----------------------------------------------------------- achievements
-    "Restart the app to apply the language.": "Язык применится после перезапуска приложения.",
-    "The language of menus and dialogs. This player is available in English only.":
-        "Язык меню и диалогов.",
+    # ----------------------------------------------------------- onboarding / language
+    # The language itself is switched in place now (see MainWindow.apply_language); this line is
+    # what a window that cannot rebuild its own interface says instead.
+    "The language changes on the next start.": "Язык изменится при следующем запуске.",
     "Playback speed": "Скорость воспроизведения",
     "Find the full list in the menu.": "Полный список — в меню.",
     "Learn the basic keyboard shortcuts.": "Основные горячие клавиши.",

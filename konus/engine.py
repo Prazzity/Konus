@@ -505,7 +505,21 @@ def instance_args(store, fx):
     if s("spdif"):
         args.append("--spdif")
     args.append("--force-dolby-surround=" + {"Automatic": "0", "On": "1", "Off": "2"}[s("dolby_detect")])
-    args.append("--audio-resampler=" + {"Fast": "ugly", "Balanced": "speex_resampler", "Best": "soxr"}[s("resampler")])
+    # Which resampler, and why not the one that reads best on paper: this resampler is also what
+    # the audio output uses to catch up after a playback speed change (libVLC shifts the
+    # resampler's input rate by a few Hz until the drift is gone), and the speex resampler cannot
+    # take that. On libVLC 3.0.24, with speex, the first two speed changes left the audio ~100 ms
+    # behind for good: "playback too late" every buffer, 80-330 buffers dropped, the wasapi stream
+    # reset over and over — audible as stuttering with gaps, and it stayed that way. The same runs
+    # with the libsamplerate resampler (or with the simple one): nothing dropped. So "Balanced"
+    # and "Best" ask for libsamplerate, which is built to have its ratio changed, and only the
+    # converter type tells them apart; the cheap end stays the plain ugly resampler.
+    resampler = s("resampler")
+    args.append("--audio-resampler=" + ("ugly" if resampler == "Fast" else "samplerate"))
+    if resampler != "Fast":
+        # 0 = sinc, best quality; 1 = sinc, medium (libsamplerate's own default here is the
+        # fastest one, which is not what "Balanced" was ever meant to be)
+        args.append("--src-converter-type=" + ("0" if resampler == "Best" else "1"))
     args.append(f"--role={s('media_role').lower()}")
     viz = fx["visualizer"]
     if viz in ("Spectometer", "Scope", "Spectrum"):
@@ -673,6 +687,7 @@ class Engine(QObject):
         self._build()
 
         self._rebuild_timer = QTimer(self, singleShot=True, interval=350, timeout=self.rebuild)
+        self._rate_timer = QTimer(self, singleShot=True, interval=self.RATE_SETTLE_MS, timeout=self._apply_rate)
         self._timer = QTimer(self, interval=200, timeout=self._poll)
         self._timer.start()
         store.settingChanged.connect(self._on_setting)
@@ -742,7 +757,9 @@ class Engine(QObject):
         ext_was = self.external_audio_on()
         t = self.mp.get_time() if active else 0
         restore = self._wanted_tracks() if active else None
-        rate = self.mp.get_rate() or 1.0
+        # the speed the interface is set to, not the one libVLC was last told: a change made a
+        # moment ago may still be waiting for the value to settle (see set_rate)
+        rate = self.fx["speed"]
         self._save_progress()
         self.mp.stop()
         self.mp.release()
@@ -1403,13 +1420,45 @@ class Engine(QObject):
     def rate(self):
         return self.mp.get_rate() or 1.0
 
+    # A speed change is not free: libVLC re-syncs the sound at the new rate, and that costs a
+    # moment of silence (measured: ~0.4 s, the audio buffer it drops and refills). So a change
+    # made on its own is handed over at once — the faster it lands, the sooner the sound is back —
+    # while a *stream* of them (dragging the speed slider, holding +) is collected and handed over
+    # once, because twenty of those in a row are twenty of those moments.
+    RATE_SETTLE_MS = 150
+
     def set_rate(self, r, announce=True):
         r = round(max(0.25, min(4.0, r)), 2)
-        self.mp.set_rate(r)
         self.fx["speed"] = r
         self.rateChanged.emit(r)
         if announce:
             self.message.emit(tr("Speed: {r}×").format(r=f"{r:g}"), "")
+        if self._rate_timer.isActive():
+            self._rate_timer.start()          # in the middle of a series: wait for the last value
+        else:
+            self._apply_rate()                # a single change: no reason to make it wait
+            self._rate_timer.start()          # what comes within the settle window is a series
+
+    def _apply_rate(self):
+        """Hand the speed to libVLC (see set_rate).
+
+        The added audio track plays in a player of its own, so it is given the new speed here
+        too. Left to the poll's rate sync it follows up to 200 ms later, and for that moment the
+        two players run at different speeds: measured with a film and an added track, the
+        positions then take a step apart and keep it (a quarter of a second, staying there for
+        the rest of the film). Handing it to both at once keeps them within a buffer."""
+        if self.mp is None:
+            return
+        rate = self.fx["speed"]
+        players = [self.mp]
+        if self.external_audio_on():
+            players.append(self._ext_mp)
+        for mp in players:
+            try:
+                if abs((mp.get_rate() or 1.0) - rate) > 0.001:
+                    mp.set_rate(rate)
+            except Exception:                  # a second player that went away must not stop this
+                diag.log("ext_audio", event="rate-failed", rate=rate)
 
     def audio_tracks(self):
         """The file's own tracks plus the external one it remembers, if there is one. The
@@ -1621,6 +1670,11 @@ class Engine(QObject):
         self._ext_mp.audio_set_volume(self._volume)
         self._ext_mp.audio_set_mute(self._muted)
         self._ext_mp.play()
+        if abs(self.fx["speed"] - 1.0) > 0.01:
+            # starting at the speed the film is playing at: the poll's rate sync would bring it
+            # there a moment later, and that moment is the two of them running apart (see
+            # _apply_rate — the same reason the film's own player is given it on start)
+            self._ext_mp.set_rate(self.fx["speed"])
         self._ext_mp.set_time(int(self._last[0]))
         if self._state not in ("playing", "opening"):
             self._ext_mp.set_pause(1)
@@ -1739,6 +1793,11 @@ class Engine(QObject):
         # that are always there are their own pipeline delays (a video output against an audio
         # buffer), plus the video clock's step. So nothing is corrected in normal playback —
         # only a real divergence (a stall, a seek that landed on one player) is pulled back.
+        # A speed change is the one moment where they do come apart (the poll's rate sync and the
+        # audio output's own restart are both later than the change); correcting that by seeking
+        # was measured and made it worse — the seek lands by the audio buffer, and chasing it left
+        # the sound a third of a second behind — so the change is handed to both players at once
+        # instead (see _apply_rate), which is what keeps them within a buffer of each other.
         if abs(got - want) > self.EXT_SYNC_LIMIT:
             diag.log("ext_audio", event="realign", want=want, got=got)
             mp.set_time(int(want))

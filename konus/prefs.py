@@ -86,7 +86,8 @@ CATEGORIES = [
         Section("Appearance", [
             Row("language", "Interface language", "dropdown", "system",
                 options=[("system", "System language"), ("en", "English"), ("ru", "Russian")],
-                info="The language of menus and dialogs."),
+                info="The language of menus and dialogs. Switching takes effect at once — the "
+                     "interface is built again where it stands and playback carries on."),
             Row("theme", "Theme", "segmented", "dark", options=[("dark", "Dark"), ("light", "Light"), ("system", "System")],
                 apply="ui", info="Dark or light interface. System follows your desktop theme."),
             Row("accent", "Accent color", "accent", "#d37918", apply="ui",
@@ -402,7 +403,11 @@ CATEGORIES = [
             Row("dolby_detect", "Detect Dolby Surround", "dropdown", "Automatic", options=["Automatic", "On", "Off"],
                 apply="instance"),
             Row("resampler", "Resampling quality", "dropdown", "Balanced", options=["Fast", "Balanced", "Best"],
-                apply="instance"),
+                apply="instance",
+                info="The converter between the file's sample rate and the sound device's — and the "
+                     "thing that keeps the sound in step when the playback speed changes. Fast is the "
+                     "plain converter, Balanced and Best the sinc one (medium and best quality), which "
+                     "is the one that holds up under a speed change."),
             Row("media_role", "Media role", "dropdown", "Video",
                 options=["Video", "Music", "Communication", "Game", "Notification", "Animation", "Production",
                          "Accessibility", "Test"], apply="instance",

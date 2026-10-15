@@ -76,7 +76,8 @@ too — they fire while another program has the focus), profiles for different k
 Player*, where you drag the buttons into the order you want.
 
 **Also.** Convert and Stream, chapters and bookmarks, a library that survives a rename, and an interface in
-English or Russian.
+English or Russian — asked on the first start, so the very first window is already in your language, and switched
+from Settings afterwards without a restart: the interface is rebuilt in place and the film keeps playing.
 
 ## Good to know
 

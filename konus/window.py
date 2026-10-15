@@ -3,6 +3,7 @@ music view + control bar, with the library sidebar floating over it) and the ful
 with its mini player. It also owns the floating panels, overlays, menus and shortcuts,
 and is the `actions` object every bar element talks to."""
 
+import ctypes
 import json
 import math
 import os
@@ -17,7 +18,7 @@ from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPixmap,
 from PyQt5.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog, QMenu, QShortcut,
                              QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from . import APP_NAME, diag, icons, prefs, sysutil, tasks, theme, wm
+from . import APP_NAME, diag, i18n, icons, prefs, sysutil, tasks, theme, wm
 from .actions import ACTION, ACTIONS, WINDOW_WIDE
 from .i18n import tr, trn
 from .controls import SeekPreview, TitleBar
@@ -85,6 +86,43 @@ def _needs_scan(items):
 
 
 
+class Shell:
+    """The main window, in a form the app can replace.
+
+    A language switch has to build the interface again, because its words enter the widgets as
+    they are made (see konus.i18n) — and that means a new MainWindow. Everything around it (the
+    entry point's arguments, the single-instance server) should keep talking to the window on
+    screen, so it talks to this: `shell.win` is always the current one. The engine, the store
+    and playback are not the window's and are untouched by a swap.
+    """
+
+    def __init__(self, engine, store):
+        self.engine = engine
+        self.store = store
+        self.win = self.build()
+
+    def build(self):
+        win = MainWindow(self.engine, self.store)
+        win.rebuild_ui = self.reload
+        return win
+
+    def reload(self, reopen=None):
+        """Put a freshly built window where the old one stood, and let the old one go.
+
+        `reopen` is a Settings category the switch was asked from: that dialog was the old
+        window's and went with it, so it opens again on the new one."""
+        old = self.win
+        state = old.take_state()
+        old.hide()                             # the new window comes up where it stood
+        self.win = self.build()                # building it hands libVLC its video window
+        self.win.restore_state(state)
+        old.dispose()
+        old.deleteLater()
+        if reopen:
+            self.win.open_settings(reopen)
+        return self.win
+
+
 class MainWindow(QWidget):
     def __init__(self, engine, store):
         # WindowMinimizeButtonHint draws nothing (the window is frameless) but it makes Windows
@@ -108,6 +146,14 @@ class MainWindow(QWidget):
         self.mode = "player"
         self.hide_ui = False
         self.pip = None
+        # Set by restore_state on a window a rebuild brought back, and None on a fresh one: what
+        # that window was showing (see take_state). Two things start differently on a rebuild —
+        # the interface is not hidden again over the mode it was in, and Settings is reopened.
+        self._state = None
+        # Set by the shell the window was built through (see konus.window.Shell): builds this
+        # window again, in place, for a language switch. Without one the switch waits for the
+        # next start (see apply_language).
+        self.rebuild_ui = None
         self.panels = {}
         self.open_panel = None
         self._fs_bars = {}
@@ -198,7 +244,7 @@ class MainWindow(QWidget):
         self._update_title()
         self._sync_all()
         if store.get("compact_start"):
-            QTimer.singleShot(0, self.toggle_hide_ui)
+            QTimer.singleShot(0, self._start_hidden)
 
     # ------------------------------------------------------------------ wiring
     def _wire_surfaces(self):
@@ -232,9 +278,14 @@ class MainWindow(QWidget):
         e.resumed.connect(self._on_resumed)
         e.fxChanged.connect(self._on_fx)
         e.rebuilt.connect(self._on_rebuilt)
-        e.recordingChanged.connect(lambda on: self._sync_all())
-        e.rateChanged.connect(lambda r: self._sync_all())
+        e.recordingChanged.connect(self._sync_on_change)
+        e.rateChanged.connect(self._sync_on_change)
         e.playlistChanged.connect(self._sync_all)
+
+    def _sync_on_change(self, *_ignored):
+        # one slot for the signals that carry a value nobody reads: bound to this window, so Qt
+        # drops it when a rebuilt window replaces this one (see konus.window.Shell)
+        self._sync_all()
 
     # ------------------------------------------------------------------ bars
     def bars(self):
@@ -823,12 +874,25 @@ class MainWindow(QWidget):
         self._sync_all()
 
     def toggle_hide_ui(self):
+        self.set_hide_ui(not self.hide_ui)
+
+    def set_hide_ui(self, on):
+        """Show or hide the interface over the video. Not a toggle, so a rebuilt window can be
+        put back into the mode it was in without guessing (see restore_state)."""
         if self.mode != "player":
             self.show_player()
-        self.hide_ui = not self.hide_ui
+        if on == self.hide_ui:
+            return
+        self.hide_ui = on
         self._layout_bars_visibility()
         self.osd.show_text("Interface hidden" if self.hide_ui else "Interface shown",
                            self.key_label("hide_ui") if self.hide_ui else "", 1.5)
+
+    def _start_hidden(self):
+        """"Hide the interface at startup" (the compact setting) — but not over a window a
+        rebuild brought back to the mode it was already in (see restore_state)."""
+        if self._state is None:
+            self.set_hide_ui(True)
 
     def toggle_pip(self):
         if self.pip is None:
@@ -1722,7 +1786,12 @@ class MainWindow(QWidget):
         from .settings import SettingsDialog
         cat = {"playback": "playback", "video": "video", "audio": "audio", "subtitles": "subtitles"}.get(tab or "", "general")
         self.close_panels()
-        SettingsDialog(self, cat).exec_()
+        dialog = SettingsDialog(self, cat)
+        dialog.exec_()
+        if dialog.reopen:
+            # the language was switched in there: the dialog went with the old window, so the
+            # switch builds the window again and this page opens on the new one
+            self.apply_language(dialog.reopen)
 
     def open_shortcuts(self):
         ShortcutsDialog(self).exec_()
@@ -2129,6 +2198,20 @@ class MainWindow(QWidget):
         for b in self.bars():
             b.update()
 
+    def apply_language(self, reopen=None):
+        """Switch the interface language, here and now.
+
+        The words enter the interface as it is built (see konus.i18n), so there is nothing on
+        screen to replace: the window is made again, and the new one takes up where this one
+        was. Playback is not the window's — the engine keeps the queue, the position and the
+        sound — so the switch costs a repaint, not a restart. `reopen` is a Settings category
+        to come back to: the dialog this was asked from is part of what gets built again."""
+        i18n.set_language(self.store.get("language"))
+        if self.rebuild_ui is None:
+            self.notify(tr("The language changes on the next start."))
+            return
+        self.rebuild_ui(reopen)
+
     def _apply_window_settings(self):
         s = self.store
         self.setWindowOpacity(max(0.1, s.get("window_opacity") / 100))
@@ -2258,6 +2341,33 @@ class MainWindow(QWidget):
     def moveEvent(self, e):
         super().moveEvent(e)
         self._reposition_floating()
+
+    # While the window is dragged (or its edge pulled), the system owns it: its move loop sits in
+    # this thread's message queue and Qt's *queued* events — moveEvent and resizeEvent among them
+    # — are not delivered until it is over (the same reason _flush_growth_strip paints by hand).
+    # The floating windows are windows of their own, and the ones that live around the video are
+    # the dark strips the eye is on: left to the queued events, the library sidebar, the panels,
+    # the fullscreen bars and the toasts stay where the window was a moment ago, for the whole
+    # drag, and then jump. These messages are handed over straight away instead, so the floating
+    # windows are put in place while the drag is still going.
+    WM_MOVE = 0x0003
+    WM_WINDOWPOSCHANGED = 0x0047
+    WM_EXITSIZEMOVE = 0x0232
+
+    def nativeEvent(self, eventtype, message):
+        if eventtype == b"windows_generic_MSG":
+            try:
+                # only the id is read: the MSG struct is ours only for the length of the call
+                mid = ctypes.c_uint32.from_address(int(message) + 8).value
+            except (TypeError, ValueError, OSError):
+                mid = 0
+            if mid in (self.WM_MOVE, self.WM_WINDOWPOSCHANGED):
+                self._reposition_floating()
+            elif mid == self.WM_EXITSIZEMOVE:
+                # the drag is over: whatever the compositor was left showing, paint it again
+                self._reposition_floating()
+                self.update()
+        return super().nativeEvent(eventtype, message)
 
     def resizeEvent(self, e):
         self._flush_growth_strip(e.oldSize(), e.size())
@@ -2435,6 +2545,91 @@ class MainWindow(QWidget):
             screen = QApplication.primaryScreen().availableGeometry()
             w, h = min(1280, screen.width() - 80), min(800, screen.height() - 80)
             self.setGeometry(screen.x() + (screen.width() - w) // 2, screen.y() + (screen.height() - h) // 2, w, h)
+
+    # ------------------------------------------------------------------ being rebuilt
+    def take_state(self):
+        """What a window built in this one's place has to come back to: where it stood, what it
+        was showing, and the screen modes. Playback is the engine's and is not in here."""
+        return {
+            "geometry": QRect(self.geometry()),
+            "visible": self.isVisible(),
+            "maximized": self.isMaximized(),
+            "minimized": self.isMinimized(),
+            "fullscreen": self.isFullScreen(),
+            "pip": self.pip is not None,
+            "hide_ui": self.hide_ui,
+            "mode": self.mode,
+            "location": tuple(self.library.loc),
+            "sidebar": self.sidebar_open,
+        }
+
+    def restore_state(self, state):
+        """Come back as the window that was replaced (see take_state)."""
+        self._state = state
+        self.setGeometry(state["geometry"])
+        if state["mode"] == "library":
+            self.library.navigate(state["location"])
+            self.show_library_window()
+        else:
+            self.show_player()
+        # the mode is put back without the notice a toggle shows: this is not the user hiding the
+        # interface, it is the window it was in
+        self.hide_ui = bool(state["hide_ui"])
+        self._layout_bars_visibility()
+        if state["sidebar"] and state["mode"] == "player":
+            self.sidebar_open = True
+            self._sync_compact()
+        if state["visible"]:
+            if state["fullscreen"]:
+                if state["maximized"]:
+                    self.showMaximized()     # where leaving fullscreen comes back to
+                self.enter_fullscreen()
+            elif state["maximized"]:
+                self.showMaximized()
+            elif state["minimized"]:
+                self.showMinimized()
+            else:
+                self.show()
+        if state["pip"] and self.engine.current and self.engine.has_video:
+            self.toggle_pip()
+
+    def dispose(self):
+        """Let go of everything this window holds. Called on the window a rebuilt one replaces
+        (see konus.window.Shell): the engine, the store and the library's own state are not this
+        window's and are left alone.
+
+        What this window hung on the *engine* comes off by itself — those are bound slots of the
+        widgets that are going away, and Qt drops them with them (see the notes in
+        konus.miniplayer and konus.panels). The media service is this window's own, so its
+        signals are dropped whole: a job that was already running can still deliver its result,
+        and it must not arrive at a widget that is gone."""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        if getattr(self, "_global", None):
+            self._global.stop()
+            try:
+                self._global.triggered.disconnect()
+            except TypeError:
+                pass
+            self._global = None
+        for signal in (self.media.thumbReady, self.media.infoReady, self.media.waveReady,
+                       self.media.cuesReady, self.media.previewReady):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass
+        if self.pip is not None:                 # its own top-level window: it would outlive us
+            self.pip.hide()
+            self.pip.deleteLater()
+            self.pip = None
+        if self.tray is not None:
+            self.tray.hide()
+        for w in (self.compact, self.toast, self.osd, self.preview, self.hint, self.stats,
+                  *self.panels.values(), *self._fs_bars.values()):
+            w.hide()
+        self.media.shutdown()                    # the new window brought its own service
+        self.hide()
 
     def closeEvent(self, e):
         if self.isFullScreen():

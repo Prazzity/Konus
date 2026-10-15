@@ -259,11 +259,20 @@ class MiniPlayer(QWidget):
         self.engine.tick.connect(self._tick)
         self.engine.mediaChanged.connect(self.refresh)
         self.engine.metaChanged.connect(self.refresh)
-        self.engine.videoChanged.connect(lambda _v: self.refresh())
+        self.engine.videoChanged.connect(self._video_changed)
         self.video = None
         self.engine.playlistChanged.connect(self._rebuild_queue)
-        self.engine.stateChanged.connect(lambda s: self.overlay.update())
+        self.engine.stateChanged.connect(self._state_changed)
         self.adjustSize()
+
+    # The engine outlives a window — a language switch builds the interface again (see
+    # konus.window.Shell) — so its signals go to bound slots: Qt drops those when this widget
+    # goes, while a lambda would stay and reach into the widgets that are already gone.
+    def _video_changed(self, _has_video):
+        self.refresh()
+
+    def _state_changed(self, _state):
+        self.overlay.update()
 
     # QueueList expects a panel-like object
     def move_rows(self, rows, dst):

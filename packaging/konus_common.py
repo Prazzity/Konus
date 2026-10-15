@@ -47,7 +47,17 @@ def portable_datas():
     ]
 
 
-HIDDENIMPORTS = collect_submodules("mutagen") + [
+def translation_modules():
+    """`konus.i18n_<code>`, one per translation file beside konus/i18n.py.
+
+    konus.i18n imports them by name while the app runs — which table to read is settled by the
+    language setting — and a bundler cannot see an import it can only resolve at run time.
+    Without this the Russian table was not in the build at all: the interface stayed English
+    whatever the setting said, a restart included (the file was missing, not the choice)."""
+    return [f"konus.{p.stem}" for p in sorted((ROOT / "konus").glob("i18n_*.py"))]
+
+
+HIDDENIMPORTS = collect_submodules("mutagen") + translation_modules() + [
     # vendor/vlc.py is loaded from its file, so PyInstaller cannot see what it imports, and
     # this one is not asked for anywhere else in the app.
     "ctypes.util",

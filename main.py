@@ -154,11 +154,22 @@ def main():
     theme.apply(store.get("theme"), store.get("accent"))
     app.setFont(theme.font(14))
 
+    if not store["language_chosen"]:
+        # The first run asks which language the interface should speak *before* the interface is
+        # built: its words enter the widgets as they are made (see konus.i18n), so this is the
+        # one moment where the answer needs no rebuilding — the window simply comes up in it.
+        from konus.language import ask
+        ask(store)
+        i18n.set_language(store.get("language"))
+
     from konus.engine import Engine
-    from konus.window import MainWindow
+    from konus.window import Shell
 
     engine = Engine(store)
-    win = MainWindow(engine, store)
+    # `shell.win` is the window on screen, and stays so across a language switch: the switch
+    # builds the interface again (see konus.i18n), which means a new window — everything here
+    # goes through the shell so it is talking to the current one (see konus.window.Shell).
+    shell = Shell(engine, store)
 
     server = None
     if store.get("single_window"):
@@ -180,7 +191,7 @@ def main():
                         items = json.loads(b.decode() or "[]")
                     except ValueError:
                         items = []
-                    win.handle_args(items)
+                    shell.win.handle_args(items)
                     c.deleteLater()
 
                 conn.readyRead.connect(on_ready)
@@ -190,16 +201,16 @@ def main():
 
         server.newConnection.connect(incoming)
 
-    if store.get("start_in_tray") and win.tray is not None and win.tray.isVisible():
+    if store.get("start_in_tray") and shell.win.tray is not None and shell.win.tray.isVisible():
         pass
     else:
-        win.show()
+        shell.win.show()
     if not store["onboarded"]:
         from konus.onboarding import Onboarding
-        Onboarding(win).exec_()
+        Onboarding(shell.win).exec_()
         store.save()
     if args:
-        win.handle_args(args)
+        shell.win.handle_args(args)
     code = app.exec_()
     if server is not None:
         server.close()

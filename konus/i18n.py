@@ -6,17 +6,32 @@ language at the moment they enter the UI — mostly inside widget constructors (
 literals and the store keeps English *values* (theme names, fx presets, language codes).
 Only what the user actually reads is replaced.
 
+That timing is why the language has to be known before the first widget is made (the first
+run asks for it, see konus.language) and why switching it later builds the interface again
+(see MainWindow.apply_language): there is no string on screen to replace, only constructors
+to run once more.
+
 Translations live in `i18n_<code>.py` next to this file as a plain dict:
 
     TABLE = {"Play": "Воспроизвести", ...}
 
 Strings that hold placeholders are written the same way and formatted at the call
 site, e.g. tr("Added {n} to {name}").format(n=3, name=title).
+
+A new table is one file plus its code in CHOICES — and, because the file is imported by
+name at run time, its module in the hidden imports of packaging/konus_common.py.
 """
 from importlib import import_module
 
+from . import diag
+
 # (name shown in Preferences, code). "System" follows the OS locale at startup.
 LANGUAGES = [("System", "system"), ("English", "en"), ("Русский", "ru")]
+
+# The codes the language screen offers, and how each language writes its own name: the screen
+# asks before anything is translated, so a name has to read on its own.
+CHOICES = ["system", "en", "ru"]
+NATIVE = {"en": "English", "ru": "Русский"}
 
 FALLBACK = "en"
 _current = FALLBACK
@@ -30,6 +45,11 @@ def _load(code):
             mod = import_module(f".i18n_{code}", __package__)
             _tables[code] = getattr(mod, "TABLE", {})
         except ImportError:
+            # The tables are imported by name here, which a bundler cannot see: without the
+            # hidden import in packaging/konus_common.py, `konus.i18n_ru` was simply not in the
+            # build and the interface stayed English whatever the setting said. A missing table
+            # still falls back to English, but it says so (see konus.diag).
+            diag.log("i18n", event="table-missing", code=code)
             _tables[code] = {}
     return _tables[code]
 
@@ -59,6 +79,22 @@ def detect_system():
 
 def language():
     return _current
+
+
+def native_name(code):
+    """A language's name in that language ("ru" -> "Русский"): what the language screen shows."""
+    return NATIVE.get(code, NATIVE[FALLBACK])
+
+
+def system_language():
+    """The code the "System" choice stands for on this machine."""
+    return detect_system()
+
+
+def in_language(code, text):
+    """`text` in `code`, whether or not that language is the one in use. The language screen
+    labels its own button with the word of the language being picked (see konus.language)."""
+    return _load(code).get(text, text) if code != FALLBACK else text
 
 
 def set_language(name):

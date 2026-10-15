@@ -396,8 +396,18 @@ class SettingsPanel(Panel):
         self._content_w = max([PANEL_W, self.tabs.content_width()]
                               + [fm.sizeHint().width() + SCROLLBAR_W for fm in forms])
         self.engine.fxChanged.connect(self._fx_changed)
-        self.engine.rateChanged.connect(lambda r: self._fx_changed("speed"))
-        self.store.libraryChanged.connect(lambda what: what == "presets" and self._update_presets())
+        self.engine.rateChanged.connect(self._rate_changed)
+        self.store.libraryChanged.connect(self._library_changed)
+
+    # The engine and the store outlive a window — a language switch builds the interface again
+    # (see konus.window.Shell) — so their signals go to bound slots, which Qt drops together with
+    # this panel, rather than to lambdas, which would stay and reach into widgets that are gone.
+    def _rate_changed(self, _rate):
+        self._fx_changed("speed")
+
+    def _library_changed(self, what):
+        if what == "presets":
+            self._update_presets()
 
     # binding helpers --------------------------------------------------------
     def content_width(self):
@@ -1184,15 +1194,30 @@ class QueuePanel(Panel):
 
         self.engine.playlistChanged.connect(self.rebuild)
         self.engine.mediaChanged.connect(self._refresh_current)
-        self.engine.mediaChanged.connect(lambda: QTimer.singleShot(1500, self.rebuild_chapters))
+        self.engine.mediaChanged.connect(self._chapters_later)
         self.engine.metaChanged.connect(self.list.viewport().update)
         self.engine.modesChanged.connect(self._modes)
-        self.store.libraryChanged.connect(lambda w: w == "bookmarks" and self.rebuild_bookmarks())
+        self.store.libraryChanged.connect(self._library_changed_here)
         self.engine.mediaChanged.connect(self.rebuild_bookmarks)
-        self.win.media.infoReady.connect(lambda _p: self.list.viewport().update())
-        self.store.settingChanged.connect(lambda k, v: k == "queue_tree" and self.rebuild())
+        self.win.media.infoReady.connect(self._info_ready)
+        self.store.settingChanged.connect(self._setting_changed)
         self.rebuild()
         self._modes()
+
+    # see the note in SettingsPanel: bound slots, so Qt drops them with this panel
+    def _chapters_later(self):
+        QTimer.singleShot(1500, self.rebuild_chapters)
+
+    def _library_changed_here(self, what):
+        if what == "bookmarks":
+            self.rebuild_bookmarks()
+
+    def _info_ready(self, _path):
+        self.list.viewport().update()
+
+    def _setting_changed(self, key, _value):
+        if key == "queue_tree":
+            self.rebuild()
 
     # queue ----------------------------------------------------------------------
     def _refresh_current(self):

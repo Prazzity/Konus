@@ -1523,9 +1523,15 @@ class Rail(QWidget):
         self.lay.addWidget(self.add, 0, Qt.AlignHCenter)
         self.lay.addStretch(1)
         lib.locationChanged.connect(self.sync)
-        lib.store.libraryChanged.connect(lambda w: w == "pinned" and self.rebuild_pins())
+        lib.store.libraryChanged.connect(self._library_changed)
         self.rebuild_pins()
         self.sync()
+
+    def _library_changed(self, what):
+        # bound, so it goes when this rail does: the store outlives a window (see
+        # konus.window.Shell), and a lambda would stay and reach into widgets that are gone
+        if what == "pinned":
+            self.rebuild_pins()
 
     def rebuild_pins(self):
         for b in self.pin_buttons:
@@ -1723,9 +1729,14 @@ class LibrarySidebar(QWidget):
         v.addWidget(add)
         v.addStretch(1)
         lib.locationChanged.connect(self.sync)
-        lib.store.libraryChanged.connect(lambda w: w == "pinned" and self.rebuild_pins())
+        lib.store.libraryChanged.connect(self._library_changed)
         self.rebuild_pins()
         self.sync()
+
+    def _library_changed(self, what):
+        # bound, for the same reason as the rail's: see _library_changed there
+        if what == "pinned":
+            self.rebuild_pins()
 
     def rebuild_pins(self):
         while self.pins.count():

@@ -63,6 +63,7 @@ DEFAULT_PROFILES = ["Movies", "Shows", "Music", "Work"]
 STATE_DEFAULTS = {
     "version": 2,
     "onboarded": False,
+    "language_chosen": False,  # the first-run language screen was answered (see konus.language)
     "profile": "Movies",
     "profiles": {name: {} for name in DEFAULT_PROFILES},
     "volume": 80,

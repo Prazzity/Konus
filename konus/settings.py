@@ -261,11 +261,14 @@ class SettingsDialog(QDialog):
         body.addWidget(self.area, 1)
         outer.addLayout(body, 1)
         self._drag = None
+        self.current_category = None       # the page in view, for coming back to it (see _set)
+        self.reopen = None                 # set when the dialog asks to be opened again
         self.show_category(category if category in prefs.CATEGORY else "general")
         self.store.settingChanged.connect(self._external_change)
 
     # --- layout --------------------------------------------------------------
     def show_category(self, key):
+        self.current_category = key
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
@@ -473,8 +476,13 @@ class SettingsDialog(QDialog):
     def _set(self, key, value):
         self.store.set(key, value)
         if key == "language":
-            # texts are baked when widgets are built, so the switch lands on the next start
-            self.win.notify(tr("Restart the app to apply the language."))
+            # The interface is built with the words it shows (see konus.i18n), so a language
+            # switch means building it again — this dialog along with it: it closes, the window
+            # is rebuilt, and the dialog opens again on the page it was on (see
+            # MainWindow.apply_language). Deferred: the dropdown that sent this is still closing.
+            self.reopen = self.current_category
+            QTimer.singleShot(0, self.accept)
+            return
         if key in ("theme", "accent"):
             self.win.apply_theme()
             QTimer.singleShot(0, lambda: self.show_category(next((k for k, it in self.items.items() if it.selected),
