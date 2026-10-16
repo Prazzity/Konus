@@ -14,11 +14,11 @@ from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout, QL
                              QWidget)
 
 from . import icons, prefs, sysutil, theme
+from . import i18n
 from .i18n import tr, tr_opts
 from .store import config_dir
 from .theme import ACCENTS, c
-from .widgets import (Button, ColorField, Dropdown, Expander, HLine, IconButton, InfoIcon, Label, NumberField,
-                      Segmented, Slider, StartVolume, Toggle, VSlider, elide, paint_shadow)
+from .widgets import (Button, ColorField, Dropdown, Expander, HLine, IconButton, InfoIcon, Label, NumberField, Segmented, Slider, StartVolume, Toggle, VSlider, clamp_position, clamp_to_screen, elide, paint_shadow)
 from .filedialog import FileDialog
 
 
@@ -105,7 +105,10 @@ class EqWidget(QWidget):
 
     def __init__(self, bands):
         super().__init__()
-        self.bands = list(bands)
+        # exactly the eleven sliders the panel is made of: a short or non-numeric stored list
+        # (a profile from another build) used to raise while the widget was built
+        self.bands = ([(b if isinstance(b, (int, float)) and not isinstance(b, bool) else 0.0)
+                       for b in bands] + [0.0] * 11)[:11]
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
@@ -231,7 +234,9 @@ class SettingsDialog(QDialog):
         body = QHBoxLayout()
         body.setSpacing(0)
         nav = QWidget()
-        nav.setFixedWidth(216)
+        # 216 was the design width, but the rail scrolls now and its bar takes 10 px of it: with
+        # that gone the longest labels ("Производительность") were clipped at the panel edge
+        nav.setFixedWidth(240)
         nv = QVBoxLayout(nav)
         nv.setContentsMargins(8, 8, 8, 8)
         self.navcard = QWidget()
@@ -251,12 +256,19 @@ class SettingsDialog(QDialog):
             cv.addWidget(it)
             self.items[cat.key] = it
         cv.addStretch(1)
-        nv.addWidget(self.navcard)
+        navscroll = QScrollArea()
+        navscroll.setWidgetResizable(True)
+        navscroll.setFrameShape(QScrollArea.NoFrame)
+        navscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        navscroll.setWidget(self.navcard)
+        nv.addWidget(navscroll, 1)
         body.addWidget(nav)
         self.nav = nav
         self.area = QScrollArea()
         self.area.setWidgetResizable(True)
-        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # as needed, not off: on a narrow screen (the card is clamped there) the form is wider
+        # than the viewport, and its right-hand column could not be reached at all
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.area.viewport().setAutoFillBackground(False)
         body.addWidget(self.area, 1)
         outer.addLayout(body, 1)
@@ -282,7 +294,8 @@ class SettingsDialog(QDialog):
     def _search(self, text):
         q = text.lower().strip()
         if not q:
-            sel = next((k for k, it in self.items.items() if it.selected), "general")
+            sel = next((k for k, it in self.items.items() if it.selected),
+                       getattr(self, "current_category", None) or "general")
             self.show_category(sel)
             return
         groups = []
@@ -358,7 +371,16 @@ class SettingsDialog(QDialog):
         lab = Label(r.label, 14, "text")
         h.addWidget(lab)
         if r.info or r.disabled:
-            h.addWidget(InfoIcon(r.info + (("<br><br><i>" + r.disabled + "</i>") if r.disabled else "")))
+            # The two halves are translated before they are joined: the table has no key with the
+            # "<br><br><i>" in it, so every row with a reason used to show English in Russian.
+            info = tr(r.info) if r.info else ""
+            if r.disabled:
+                # a reason may come in parts (a shared prefix and its own sentence): each part is
+                # a key of its own, so the whole thing has to be translated in pieces
+                parts = r.disabled if isinstance(r.disabled, tuple) else (r.disabled,)
+                reason = " ".join(tr(p) for p in parts)
+                info += ("<br><br><i>" + reason + "</i>") if info else ("<i>" + reason + "</i>")
+            h.addWidget(InfoIcon(info, translated=True))
         h.addStretch(1)
         w = self._control(r)
         if w is not None:
@@ -546,7 +568,17 @@ class SettingsDialog(QDialog):
             if w.confirm(tr("Reset all settings?"),
                          tr("Every setting of the “{profile}” profile goes back to its default. "
                             "Your library and playlists are kept.").format(profile=self.store.profile)):
+                def effective(value):
+                    code = i18n.code_for(value)
+                    return i18n.detect_system() if code == "system" else code
+
+                before = self.store.get("language")
                 self.store.reset_settings()
+                if effective(self.store.get("language")) != effective(before):
+                    # the stored language changed: rebuild the interface like the dropdown does
+                    # (i18n only follows when the window is built again)
+                    self.reopen = self.current_category
+                    QTimer.singleShot(0, self.accept)
                 w.apply_theme()
                 self.show_category("general")
         elif key == "clear_history":
@@ -643,10 +675,14 @@ class SettingsDialog(QDialog):
         p.drawRoundedRect(QRectF(g), 6, 6)
 
     def showEvent(self, e):
+        # Built at the size the design calls for; on a screen that cannot hold it (a 1280x720
+        # laptop against this 913 px card) the footer and the last rows were off-screen.
+        clamp_to_screen(self)
         par = self.parentWidget()
         if par is not None:
             g = par.window().frameGeometry()
             self.move(g.center() - self.rect().center())
+        clamp_position(self)
         super().showEvent(e)
 
     def mousePressEvent(self, e):

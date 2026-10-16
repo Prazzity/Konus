@@ -128,7 +128,7 @@ CATEGORIES = [
     ]),
     Category("interface", "App", "Interface", "interface", "Interface Settings", [
         Section("Skin", [
-            Row("custom_skin", "Use a custom skin", "toggle", False, disabled=NOT_IN_LIBVLC + " Skins only work in VLC's skins2 interface.",
+            Row("custom_skin", "Use a custom skin", "toggle", False, disabled=(NOT_IN_LIBVLC, "Skins only work in VLC's skins2 interface."),
                 info="Use a VLC skin file (.vlt) instead of this interface."),
             Row("skin_file", "Skin file", "path", "", disabled=NOT_IN_LIBVLC, info="The .vlt skin to use."),
         ]),
@@ -163,11 +163,6 @@ CATEGORIES = [
                 info="An icon in the panel tray with playback controls."),
             Row("start_in_tray", "Start minimized to the tray", "toggle", False, apply="ui",
                 info="Start hidden; click the tray icon to show the window."),
-            Row("track_popup", "Show a popup when the track changes", "dropdown", "When minimized",
-                options=["When minimized", "Always", "Never"], apply="ui",
-                info="A desktop notification with the title of the new track."),
-            Row("popup_duration", "Popup duration", "slider", 3.0, apply="ui", min=0.0, max=10.0, step=0.5, ticks=21,
-                labels=["0 s", "5 s", "10s"], suffix=" s"),
         ]),
         Section("Playlist", [
             Row("queue_tree", "Show the playlist as a tree", "toggle", True, apply="ui",
@@ -445,7 +440,7 @@ CATEGORIES = [
                 apply="instance"),
             Row("sub_size", "Font size", "dropdown", "Automatic",
                 options=["Automatic", "Smaller", "Small", "Normal", "Large", "Larger"], apply="instance", pixels_key="sub_px"),
-            Row("sub_px", "Font size", "number", 32, min=8, max=200, suffix=" px", apply="instance",
+            Row("sub_px", "Font size in pixels", "number", 32, min=8, max=200, suffix=" px", apply="instance",
                 info="Used when the size mode above is Pixels."),
             Row("sub_bold", "Bold", "toggle", False, apply="instance"),
             Row("sub_color", "Text color", "color", "#FFFFFF", apply="instance"),
@@ -483,7 +478,7 @@ CATEGORIES = [
             Row("sub_paths", "Load subtitles from these folders", "text", "./Subtitles, ./subtitles, ./Subs, ./subs",
                 apply="instance", info="Folders, relative to the video, that are searched for subtitle files."),
             Row("sub_ignore_ass", "Ignore styling in ASS and SSA subtitles", "toggle", False,
-                disabled=NOT_IN_LIBVLC + " libass styling can't be switched off per player.",
+                disabled=(NOT_IN_LIBVLC, "libass styling can't be switched off per player."),
                 info="Show ASS/SSA subtitles with your font and colours."),
             Row("sub_shadow_angle", "Shadow angle", "number", -45, min=-360, max=360, suffix="°", apply="instance"),
             Row("sub_direction", "Text direction", "dropdown", "Automatic", options=["Automatic", "Left to right", "Right to left"],
@@ -531,7 +526,7 @@ CATEGORIES = [
                 apply="instance"),
         ]),
     ]),
-    Category("performance", "System", "Performance", "preferences", "Performance Settings", [
+    Category("performance", "System", "Performance", "speed", "Performance Settings", [
         Section("Decoding", [
             Row("hwdec", "Hardware-accelerated decoding", "dropdown", "Automatic",
                 options=["Automatic", "Direct3D11", "Off"],

@@ -35,11 +35,16 @@ def _run(parent, caption, directory, file_filter, mode, options):
     screen = (anchor.screen() if anchor is not None else None) or QApplication.primaryScreen()
     avail = screen.availableGeometry()
     dlg.setMinimumSize(480, 320)
-    w, h = min(960, int(avail.width() * 0.8)), min(620, int(avail.height() * 0.8))
+    w = max(480, min(960, int(avail.width() * 0.8)))
+    h = max(320, min(620, int(avail.height() * 0.8)))
     dlg.resize(w, h)
     if anchor is not None and anchor.isVisible():
         c = anchor.frameGeometry().center()
-        dlg.move(max(avail.left(), c.x() - w // 2), max(avail.top(), c.y() - h // 2))
+        # the whole card inside the screen, not just its corner: with only the lower bound the
+        # Open/Cancel row ended up beyond the edge, and the dialog has its own buttons there
+        x = min(max(avail.left(), c.x() - w // 2), avail.right() - w)
+        y = min(max(avail.top(), c.y() - h // 2), avail.bottom() - h)
+        dlg.move(max(avail.left(), x), max(avail.top(), y))
     # The shell draws this dialog, so it follows the *system* appearance: with Windows in light
     # mode its title bar stayed light while the app is dark. Ask DWM for a dark caption —
     # before the dialog is shown, not on a timer after it: the attribute only counts for the

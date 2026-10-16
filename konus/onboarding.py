@@ -5,13 +5,14 @@ import os
 
 from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFontMetrics, QPainter, QPen
-from PyQt5.QtWidgets import (QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QStackedWidget, QVBoxLayout,
+from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QSizePolicy,
+                             QSpacerItem, QStackedWidget, QVBoxLayout,
                              QWidget)
 
 from . import icons, theme
 from .i18n import tr
 from .theme import ACCENTS, c
-from .widgets import Label, paint_shadow
+from .widgets import Label, clamp_position, clamp_to_screen, paint_shadow, scroll
 from .filedialog import FileDialog
 
 
@@ -47,11 +48,13 @@ class SolidButton(QWidget):
 class ThemeTile(QWidget):
     clicked = pyqtSignal(str)
 
+    W, H = 124, 160          # the design size; the artwork is drawn from the live size
+
     def __init__(self, key, label):
         super().__init__()
         self.key, self.label = key, label
         self.selected = False
-        self.setFixedSize(124, 160)
+        self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.PointingHandCursor)
 
     def mouseReleaseEvent(self, e):
@@ -60,7 +63,11 @@ class ThemeTile(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        box = QRectF(12, 12, 100, 100)
+        # the tile scales with the card: the mock window keeps its square, the label its line.
+        # The box is centred — the selection ring is drawn 10 px outside it, and an offset box
+        # pushed that ring past the widget's right edge (the orange outline came out cut off)
+        side = min(self.width() - 24, self.height() - 60)
+        box = QRectF((self.width() - side) / 2, 12, side, side)
         if self.selected:
             p.setPen(QPen(c("accent"), 4))
             p.setBrush(Qt.NoBrush)
@@ -85,21 +92,30 @@ class ThemeTile(QWidget):
                                      QPointF(box.right(), box.bottom()), QPointF(box.left() + 88, box.bottom())]))
             p.setClipping(False)
         p.setFont(theme.font(16))
-        p.setPen(c("text"))
-        p.drawText(QRectF(0, 128, self.width(), 26), Qt.AlignCenter, self.label)
+        # the tile is a mock-up of the window over a dark backdrop: its label has to be light
+        p.setPen(c("on_video"))
+        p.drawText(QRectF(0, box.bottom() + 16, self.width(), 26), Qt.AlignCenter, self.label)
 
 
 class Swatches(QWidget):
     picked = pyqtSignal(str)
+    STEP = 80                       # the design step; a narrower card gets smaller circles
 
     def __init__(self, value):
         super().__init__()
         self.value = value
-        self.setFixedSize(9 * 80, 64)
+        self.step = self.STEP
+        self.radius = 20
+        self.setFixedSize(len(ACCENTS) * self.step, 64)
         self.setCursor(Qt.PointingHandCursor)
 
+    def set_step(self, step):
+        self.step = max(34, int(step))
+        self.radius = max(12, round(self.step * 0.25))
+        self.setFixedSize(len(ACCENTS) * self.step, max(40, round(self.step * 0.8)))
+
     def mouseReleaseEvent(self, e):
-        i = int(e.x() // 80)
+        i = int(e.x() // max(1, self.step))
         if 0 <= i < len(ACCENTS):
             self.value = ACCENTS[i]
             self.update()
@@ -108,9 +124,10 @@ class Swatches(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        cy = self.height() / 2
+        r = self.radius
         for i, col in enumerate(ACCENTS):
-            cx = i * 80 + 32
-            cy = 32
+            cx = i * self.step + self.step / 2
             sel = col.lower() == self.value.lower()
             q = QColor(col)
             if not sel:
@@ -120,18 +137,26 @@ class Swatches(QWidget):
                 ring.setAlphaF(0.35)
                 p.setPen(QPen(ring, 4))
                 p.setBrush(Qt.NoBrush)
-                p.drawEllipse(QRectF(cx - 30, cy - 30, 60, 60))
+                p.drawEllipse(QRectF(cx - r * 1.5, cy - r * 1.5, r * 3, r * 3))
             p.setPen(Qt.NoPen)
             p.setBrush(q)
-            p.drawEllipse(QRectF(cx - 20, cy - 20, 40, 40))
+            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
 
 
 class KeyCap(QWidget):
+    H = 50                   # the design height; a smaller card gets a flatter cap
+
     def __init__(self, text):
         super().__init__()
         self.text = text
-        fm = QFontMetrics(theme.font(16))
-        self.setFixedSize(max(56, fm.horizontalAdvance(text) + 44), 50)
+        self.size = 16
+        self.set_height(self.H)
+
+    def set_height(self, h, size=None):
+        self.size = int(size or self.size)
+        self.setFixedSize(max(44, QFontMetrics(theme.font(self.size)).horizontalAdvance(self.text) + 44),
+                          max(28, int(h)))
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -143,7 +168,7 @@ class KeyCap(QWidget):
         p.setPen(QPen(QColor("#3a3a3a"), 2))
         p.setBrush(QColor("#232323"))
         p.drawRoundedRect(r, 8, 8)
-        p.setFont(theme.font(16))
+        p.setFont(theme.font(self.size))
         p.setPen(QColor("#cfcfcf"))
         p.drawText(r, Qt.AlignCenter, self.text)
 
@@ -200,10 +225,55 @@ class Onboarding(QDialog):
         outer.setContentsMargins(m, m, m, m)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
-        self.stack.addWidget(self._welcome())
-        self.stack.addWidget(self._theme())
-        self.stack.addWidget(self._shortcuts())
+        self._gaps = []              # (spacer, its design height) — scaled to the room
+        self._scalables = []         # callables that resize what is not a gap
+        for page in (self._welcome(), self._theme(), self._shortcuts()):
+            self.stack.addWidget(page)
         self._drag = None
+
+    def _gap(self, lay, height):
+        """A vertical gap that shrinks with the card (see _fit_pages)."""
+        item = QSpacerItem(0, height, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        lay.addSpacerItem(item)
+        self._gaps.append((item, height))
+        return item
+
+    def _apply_scale(self, s):
+        for item, height in self._gaps:
+            item.changeSize(0, max(6, round(height * s)))
+        for resize in self._scalables:
+            resize(s)
+        for page in self._pages():
+            page.updateGeometry()
+
+    def _pages(self):
+        return [self.stack.widget(i) for i in range(self.stack.count())]
+
+    def _fit_pages(self, room=None):
+        """The pages are designed for the 856 px card. On a smaller screen every fixed gap, the
+        key caps and the theme tiles scale with the room there is, so the wizard keeps its shape,
+        its buttons stay on screen and nothing needs a scrollbar.
+
+        Two passes, because a page keeps some of its height fixed (a title line, the footer
+        buttons): the first guess is made from the room, the second one from what the pages
+        still ask for — which is also what has to be small enough for the card to shrink."""
+        design = 856 - 2 * self.MARGIN
+        room = room or self.stack.height() or design
+        scale = max(0.5, min(1.0, room / design))
+        self._fit_scale = scale
+        self._apply_scale(scale)
+        for _ in range(4):
+            need = max([p.minimumSizeHint().height() for p in self._pages()] or [0])
+            if need <= room or scale <= 0.5:
+                break
+            scale = max(0.5, scale * (room / need) * 0.98)
+            self._fit_scale = scale
+            self._apply_scale(scale)
+        self.stack.widget(self.stack.currentIndex()).update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit_pages()
 
     def _buttons(self, back=True, next_text="Next"):
         row = QHBoxLayout()
@@ -221,29 +291,34 @@ class Onboarding(QDialog):
 
     def _welcome(self):
         w = QWidget()
+        self._welcome_page = w
         v = QVBoxLayout(w)
+        self._welcome_lay = v
         v.setContentsMargins(248, 110, 50, 56)
         v.setSpacing(0)
         logo = Label("")
         logo.setPixmap(icons.pixmap("logo", 128))
         logo.setAlignment(Qt.AlignCenter)
         logo.setContentsMargins(0, 0, 198, 0)
+        self._welcome_logo = logo
         v.addWidget(logo)
-        v.addSpacing(40)
+        self._gap(v, 40)
         t = Label("Welcome to Konus!", 32, "text_hi", weight=300)
         t.setAlignment(Qt.AlignCenter)
         t.setContentsMargins(0, 0, 198, 0)
+        self._welcome_title = t
         v.addWidget(t)
-        v.addSpacing(40)
+        self._gap(v, 40)
         body = Label("Konus plays everything through libVLC, the engine VLC media player uses, so it opens "
                      "what your VLC opens. An independent player: not affiliated with VideoLAN, and it carries no "
                      "VLC name, cone or logo.", 16, "text",
                      wrap=True)
         body.setFixedWidth(594)
+        self._welcome_body = body
         v.addWidget(body)
-        v.addSpacing(50)
+        self._gap(v, 50)
         v.addWidget(Label("Choose a Media Folder to get started with", 14, "icon"))
-        v.addSpacing(14)
+        self._gap(v, 14)
         row = QHBoxLayout()
         row.setSpacing(10)
         default = os.path.join(os.path.expanduser("~"), "Videos")
@@ -251,8 +326,8 @@ class Onboarding(QDialog):
             default = self.store["video_folders"][0]
         self.folder = QLineEdit(default)
         self.folder.setFixedSize(470, 36)
-        self.folder.setStyleSheet(f"QLineEdit {{ background: #090909; border: 1px solid #222222; border-radius: 6px; "
-                                  f"padding: 0 12px; font-size: 16px; color: {theme.hexc('text_hi')}; }}")
+        self.folder.setStyleSheet(f"QLineEdit {{ background: {theme.hexc('field')}; border: 1px solid {theme.hexc('line')}; "
+                                  f"border-radius: 6px; padding: 0 12px; font-size: 16px; color: {theme.hexc('text_hi')}; }}")
         row.addWidget(self.folder)
         browse = SolidButton("Browse", "dark", width=114)
         browse.clicked.connect(self._browse)
@@ -278,16 +353,18 @@ class Onboarding(QDialog):
         self.preview.setFixedHeight(594)
         pv = QVBoxLayout(self.preview)
         pv.setContentsMargins(0, 160, 0, 0)
+        self._theme_gap = QSpacerItem(0, 70, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self._scalables.append(self._fit_theme)
         t = Label("Select your preferred theme and color.", 24, "text", weight=300)
-        t.set_color("text")
+        t.set_color("on_video")
         t.setAlignment(Qt.AlignCenter)
         pv.addWidget(t)
-        pv.addSpacing(70)
+        pv.addSpacerItem(self._theme_gap)
         tiles = QHBoxLayout()
         tiles.addStretch(1)
         self.tiles = {}
         for key, label in (("light", "Light"), ("dark", "Dark"), ("system", "System")):
-            tile = ThemeTile(key, label)
+            tile = ThemeTile(key, tr(label))
             tile.clicked.connect(self._pick_theme)
             tiles.addWidget(tile)
             tiles.addSpacing(32)
@@ -296,8 +373,11 @@ class Onboarding(QDialog):
         pv.addLayout(tiles)
         pv.addStretch(1)
         v.addWidget(self.preview)
-        bottom = QHBoxLayout()
+        self._theme_bottom = QHBoxLayout()
+        bottom = self._theme_bottom
         bottom.setContentsMargins(36, 34, 34, 56)
+        self._scalables.append(lambda s, b=bottom: b.setContentsMargins(
+            36, max(12, round(34 * s)), 34, max(20, round(56 * s))))
         self.swatches = Swatches(self.store.get("accent"))
         self.swatches.picked.connect(self._pick_accent)
         bottom.addWidget(self.swatches)
@@ -326,15 +406,20 @@ class Onboarding(QDialog):
 
     def _shortcuts(self):
         w = QWidget()
+        self._shortcut_page = w
         v = QVBoxLayout(w)
         v.setContentsMargins(62, 70, 50, 56)
+        self._scalables.append(lambda s, v=v: v.setContentsMargins(
+            62, max(24, round(70 * s)), 50, max(20, round(56 * s))))
         t = Label("Learn the basic keyboard shortcuts.", 24, "text", weight=300)
         t.setAlignment(Qt.AlignCenter)
         v.addWidget(t)
-        v.addSpacing(50)
-        grid = QGridLayout()
+        self._gap(v, 50)
+        self._shortcut_grid = QGridLayout()
+        grid = self._shortcut_grid
         grid.setVerticalSpacing(30)
         grid.setHorizontalSpacing(0)
+        self._caps = []
         keys = self.win.hotkeys()
         left = [("Play / Pause", [keys.get("play_pause", "Space")]),
                 ("Seek Backward / Forward", ["←", "→"]),
@@ -348,15 +433,20 @@ class Onboarding(QDialog):
                  ("Show / Hide File Browser", [keys.get("library", "L")]),
                  ("Take a Snapshot", keys.get("snapshot", "Shift+S").upper().split("+")),
                  ("Record", keys.get("record", "Shift+R").upper().split("+"))]
+        self._shortcut_labels = []
         for col, rows in ((0, left), (2, right)):
             for r, (label, caps) in enumerate(rows):
-                grid.addWidget(Label(label, 16, "text"), r, col)
+                lab = Label(label, 16, "text")
+                self._shortcut_labels.append(lab)
+                grid.addWidget(lab, r, col)
                 h = QHBoxLayout()
                 h.setSpacing(8)
                 for i, cap in enumerate(caps):
                     if i and len(caps) == 2 and cap not in ("S", "R"):
                         h.addWidget(Label("/", 16, "text_2"))
-                    h.addWidget(KeyCap(cap))
+                    cap_widget = KeyCap(cap)
+                    self._caps.append(cap_widget)
+                    h.addWidget(cap_widget)
                 h.addStretch(1)
                 cw = QWidget()
                 cw.setLayout(h)
@@ -373,6 +463,47 @@ class Onboarding(QDialog):
         bottom.addLayout(self._buttons(next_text="Finish"))
         v.addLayout(bottom)
         return w
+
+    def _fit_theme(self, s):
+        # the welcome page: its 248 px left inset (and the 198 px right insets of the logo and
+        # the title, which cancel it out) only work on the wide stack — on a narrow card the
+        # title ran off the left edge and the body text past the right one
+        avail = self.stack.width() or 1090
+        if s >= 0.85:
+            self._welcome_lay.setContentsMargins(248, 110, 50, 56)
+            pad = 198
+        else:
+            pad = 0
+            side = max(24, (avail - 600) // 2)
+            self._welcome_lay.setContentsMargins(side, max(28, round(110 * s)), side, max(20, round(56 * s)))
+        self._welcome_logo.setContentsMargins(0, 0, pad, 0)
+        self._welcome_title.setContentsMargins(0, 0, pad, 0)
+        self._welcome_body.setFixedWidth(min(594, max(280, avail - 2 * (pad and 248 or max(24, (avail - 600) // 2)))))
+
+        self.preview.setFixedHeight(max(320, round(594 * s)))
+        pv = self.preview.layout()
+        pv.setContentsMargins(0, max(50, round(160 * s)), 0, 0)
+        self._theme_gap.changeSize(0, max(16, round(70 * s)))
+        for tile in self.tiles.values():
+            tile.setFixedSize(max(84, round(tile.W * s)), max(104, round(tile.H * s)))
+
+        # the swatch row sits on the same line as the buttons: it has to give way with them
+        room = self.stack.width() - 250
+        self.swatches.set_step(min(Swatches.STEP, room / max(1, len(ACCENTS))))
+
+        # the labels and the caps lose a size or two with the card: at 240 px columns a long
+        # label like "Seek Backward / Forward" was cut mid-word on a narrow screen
+        size = 16 if s >= 0.85 else (15 if s >= 0.72 else 14)
+        for lab in self._shortcut_labels:
+            # on a card this narrow a long label cannot fit one line at all: let it wrap
+            lab.setWordWrap(s < 0.8)
+            lab.setFont(theme.font(size))
+        for cap in self._caps:
+            cap.set_height(KeyCap.H * s, size)
+        self._shortcut_grid.setVerticalSpacing(max(12, round(30 * s)))
+        col = max(124, min(240, round(216 * (self.stack.width() / 1090))))
+        self._shortcut_grid.setColumnMinimumWidth(0, col)
+        self._shortcut_grid.setColumnMinimumWidth(2, col)
 
     def _next(self):
         i = self.stack.currentIndex()
@@ -398,11 +529,24 @@ class Onboarding(QDialog):
         p.drawRoundedRect(r, 14, 14)
 
     def showEvent(self, e):
+        # Built at the size the design calls for; on a screen that cannot hold it (a 1280x720
+        # laptop against this 913 px card) the footer and the last rows were off-screen.
+        clamp_to_screen(self)
         par = self.parentWidget()
         if par is not None:
             g = par.window().frameGeometry()
             self.move(g.center() - self.rect().center())
+        clamp_position(self)
         super().showEvent(e)
+        # the pages first, so a small screen can really shrink the card (a page's own minimum
+        # would otherwise keep the card at its design height and push its footer off the screen)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry().height() - 2 * self.MARGIN - 20
+            self._fit_pages(room)
+            clamp_to_screen(self)
+        self._fit_pages()
+        clamp_position(self)
 
     def mousePressEvent(self, e):
         self._drag = e.globalPos() - self.frameGeometry().topLeft()

@@ -20,12 +20,11 @@ from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QGridLayout, QH
 from . import APP_NAME, __version__, icons, prefs, sysutil, tasks, theme
 from .i18n import tr, trn, tr_opts
 from .prefs import MOUSE_ROWS
-from .media import match_audio_tracks
+from .media import match_audio_tracks, track_candidates, track_folders
 from .engine import (AUDIO_EXT, MEDIA_EXT, SUB_EXT, VIDEO_EXT, display_name, ext, fmt_time, is_url, media_in_dir,
                      natural_key, parse_playlist_text)
 from .theme import c
-from .widgets import (Button, Dropdown, HLine, IconButton, Label, MenuItem, PopupMenu, Toggle, elide, paint_shadow,
-                      scroll)
+from .widgets import (Button, Dropdown, HLine, IconButton, Label, MenuItem, PopupMenu, Toggle, clamp_position, clamp_to_screen, elide, esc, paint_shadow, scroll, sep)
 from .filedialog import FileDialog
 
 
@@ -58,6 +57,7 @@ class Dialog(QDialog):
         top = QHBoxLayout()
         top.setContentsMargins(10, 0, 0, 0)
         self.title_label = Label(title, 14, "icon")
+        self._title_text = tr(title)          # elided to the header on every resize
         top.addWidget(self.title_label)
         top.addStretch(1)
         close = IconButton("x", "Close (Esc)", box=(32, 32))
@@ -135,11 +135,23 @@ class Dialog(QDialog):
         p.setBrush(c("panel_head"))
         p.drawPath(path.intersected(clip))
 
+    def resizeEvent(self, e):
+        # the header has one line and no room to grow: a long title (a playlist the user named)
+        # ran off under the close button instead of being elided
+        if getattr(self, "_title_text", ""):
+            self.title_label.setText(elide(self._title_text, theme.font(14), max(80, self.width() - 140)))
+        super().resizeEvent(e)
+
     def showEvent(self, e):
+        # A dialog is built at a size the design calls for; on a screen that cannot hold it (a
+        # 1280x720 laptop against the 913 px Settings card) its footer and last rows were simply
+        # off-screen. The card gives way, and the bodies that scroll keep their content reachable.
+        clamp_to_screen(self)
         par = self.parentWidget()
         if par is not None:
             g = par.window().frameGeometry()
             self.move(g.center() - self.rect().center())
+        clamp_position(self)
         super().showEvent(e)
         QTimer.singleShot(0, self._first_field)
 
@@ -327,7 +339,7 @@ class PairRow(QWidget):
         p.drawPixmap(int(half + 14), 6, icons.pixmap("subtitle", 24))
         p.setPen(c("text") if self.sub else c("text_3"))
         p.drawText(QRectF(half + 48, 0, half - 100, 36), Qt.AlignVCenter,
-                   elide(os.path.basename(self.sub) if self.sub else "No subtitles, click to choose", f, half - 100))
+                   elide(os.path.basename(self.sub) if self.sub else tr("No subtitles, click to choose"), f, half - 100))
 
 
 class CheckRow(QWidget):
@@ -403,8 +415,11 @@ class AddSubtitlesDialog(Dialog):
         self.query.edit.returnPressed.connect(self._search_online)
         self.link.edit.returnPressed.connect(self._download_link)
         self.pairs = {}
+        # ticks the user made are kept across rebuilds (see _reload_ticks)
         self.checked = set()
+        self._ticks_for = None
         self.net = QNetworkAccessManager(self)
+        self._reload_ticks()
         self.rebuild()
 
     def _videos(self):
@@ -430,7 +445,18 @@ class AddSubtitlesDialog(Dialog):
                                              options=self.win.dialog_options())
         if d:
             self.folder = d
+            self._reload_ticks()
             self.rebuild()
+
+    def _reload_ticks(self):
+        """The ticks start as the subtitles the file already has. Rebuilt only when the target
+        or the folder changes: a rebuild for any other reason used to wipe what the user had
+        ticked, and the subtitle just downloaded through a link with it."""
+        key = (self.target_path, self.folder)
+        if key == self._ticks_for:
+            return
+        self._ticks_for = key
+        self.checked = set(self.win.store.external_subs(self.target_path)) if self.target_path else set()
 
     def rebuild(self):
         origin = self.origin.value
@@ -459,17 +485,16 @@ class AddSubtitlesDialog(Dialog):
             return
         subs = self._subs()
         if self.scope.value == "file":
-            existing = set(self.win.store.external_subs(self.target_path)) if self.target_path else set()
             stem = os.path.splitext(os.path.basename(self.target_path or ""))[0].lower()
             subs.sort(key=lambda s: (not os.path.basename(s).lower().startswith(stem[:8]), natural_key(s)))
-            self.checked = set(existing)
             if not subs:
                 self.list_lay.addWidget(Label("No subtitle files in this folder.", 14, "text_3"))
-                self.save.setEnabled(False)      # nothing to attach
             for s in subs:
                 row = CheckRow(os.path.basename(s), s in self.checked)
                 row.toggled.connect(lambda on, s=s: self.checked.add(s) if on else self.checked.discard(s))
                 self.list_lay.addWidget(row)
+            # something to attach, or something attached to take off
+            offer = bool(subs) or bool(self.checked)
         else:
             videos = self._videos()
             current = {v: (self.win.store.external_subs(v) or [None])[0] for v in videos}
@@ -482,7 +507,11 @@ class AddSubtitlesDialog(Dialog):
                 row = PairRow(v, self.pairs[v])
                 row.pick.connect(self._pick_for)
                 self.list_lay.addWidget(row)
+            offer = bool(videos)
         self.list_lay.addStretch(1)
+        # the button is decided on every rebuild, not only where the list came out empty: a
+        # scope or folder chosen later used to leave it disabled with something to save on screen
+        self.save.setEnabled(offer)
 
     def _pretty(self, path):
         home = os.path.expanduser("~")
@@ -490,7 +519,7 @@ class AddSubtitlesDialog(Dialog):
         return " / ".join(x for x in p.split(os.sep) if x)
 
     def _pick_for(self, video):
-        items = [MenuItem(os.path.basename(s), lambda s=s, v=video: self._set_pair(v, s),
+        items = [MenuItem(os.path.basename(s), lambda s=s, v=video: self._set_pair(v, s), raw=True,
                           checked=(self.pairs.get(video) == s)) for s in self._subs_cache]
         items.append(MenuItem("No subtitles", lambda v=video: self._set_pair(v, None)))
         items.append(MenuItem("Other file…", lambda v=video: self._pick_file(v)))
@@ -557,6 +586,11 @@ class AddSubtitlesDialog(Dialog):
                     n += 1
                     if engine.current == v:
                         engine.add_subtitle(s)
+            if not n:
+                # closing on nothing saved used to read "saved for 0 videos"; let the user
+                # pair a row instead of taking the dialog away
+                self.win.notify(tr("Nothing to save: no subtitles matched"))
+                return
             self.win.notify(tr("Subtitles saved for {n} video").format(n=n))
         self.accept()
 
@@ -621,7 +655,7 @@ class KeyField(QWidget):
         f.setFamily("DejaVu Sans Mono") if False else None
         p.setFont(f)
         p.setPen(c("text_hi") if self.seq else c("text_3"))
-        text = "Press a key…" if self.capturing else (self.seq or "")
+        text = tr("Press a key…") if self.capturing else (self.seq or "")
         p.drawText(QRectF(20, 0, self.width() - 60, self.height()), Qt.AlignCenter, text)
         p.drawPixmap(self.width() - 20 - 24 + 4, 4, icons.pixmap("edit", 24))
 
@@ -777,7 +811,7 @@ class NetworkDialog(Dialog):
         self.enqueue = enqueue
         self.body_lay.addWidget(section("Network URL", "You can enter multiple links to load."))
         self.urls = QPlainTextEdit()
-        self.urls.setPlaceholderText("e.g., https://www.example.com/stream.avi")
+        self.urls.setPlaceholderText(tr("e.g., https://www.example.com/stream.avi"))
         self.urls.setFixedHeight(194)
         self.urls.setStyleSheet(f"QPlainTextEdit {{ background: {theme.hexc('field')}; border: 2px solid "
                                 f"{theme.hexc('item')}; border-radius: 6px; padding: 8px 12px; }}")
@@ -811,7 +845,9 @@ class NetworkDialog(Dialog):
         urls = [u.strip() for u in self.urls.toPlainText().split() if u.strip()]
         urls = [u if "://" in u else "http://" + u for u in urls]
         name = self.name.text().strip()
-        playlist_like = [u for u in urls if re.search(r"\.(m3u8?|pls)(\?|$)", u, re.I) and not u.lower().endswith(".m3u8")]
+        # only real playlist files: an HLS manifest (.m3u8, query string or not) is a stream
+        # the player opens itself, not a list to download and parse
+        playlist_like = [u for u in urls if re.search(r"\.(m3u|pls)(\?|$)", u, re.I)]
         if len(urls) == 1 and playlist_like:
             self._fetch_list(urls[0], name or display_name(urls[0]).rsplit(".", 1)[0].title())
             return
@@ -831,10 +867,16 @@ class NetworkDialog(Dialog):
 
     def _fetch_list(self, url, name):
         self.save.setEnabled(False)
-        self.save.setText("Loading…")
+        self.save.setText(tr("Loading…"))
         reply = self.net.get(_request(url))
 
         def done():
+            # a 404 or a refused connection is not a playlist: its HTML body used to be parsed
+            # and saved as a "stream"; and a dialog the user closed has no business writing
+            # lists or moving the library anywhere
+            if reply.error() or not self.isVisible():
+                reply.deleteLater()
+                return
             text = bytes(reply.readAll()).decode("utf-8", "replace")
             reply.deleteLater()
             entries = parse_playlist_text(text, "")
@@ -845,7 +887,8 @@ class NetworkDialog(Dialog):
                 self.accept()
                 return
             lid = self.win.store.add_network_list(name, [{"name": n, "url": u} for n, u in entries])
-            self.win.notify(tr("Saved “{name}” with {n} streams").format(name=name, n=len(entries)))
+            self.win.notify(tr("Saved “{name}” with {n}").format(
+                name=esc(name), n=trn("stream", "streams", len(entries))))
             self.win.show_library_window(("network", "list", lid))
             self.accept()
         reply.finished.connect(done)
@@ -918,7 +961,7 @@ class DropZone(QWidget):
         p.setPen(c("text_2"))
         if not self.files:
             p.drawText(QRectF(0, self.height() / 2 - 40, self.width(), 30), Qt.AlignCenter,
-                       "Drag files into the box or click here to select files.")
+                       tr("Drag files into the box or click here to select files."))
             p.setPen(Qt.NoPen)
             p.setBrush(c("item"))
             br = QRectF(self.width() / 2 - 42, self.height() / 2, 84, 30)
@@ -992,8 +1035,8 @@ class PlaylistDialog(Dialog):
         self.body_lay.addLayout(top)
         self.body_lay.addWidget(HLine())
         self.body_lay.addWidget(section("Select Files", "These files will be added to the playlist." if not pl else
-                                        tr("{n} items. Files you add here are appended.")
-                                        .format(n=len(pl['items']))))
+                                        trn("item", "items", len(pl['items'])) + ". "
+                                        + tr("Files you add here are appended.")))
         self.drop = DropZone()
         if items:
             self.drop._add(items)
@@ -1011,7 +1054,7 @@ class PlaylistDialog(Dialog):
                 self.win.store.add_to_playlist(self.pid, self.drop.files)
         else:
             self.pid = self.win.store.add_playlist(name, self.drop.files, self.thumb.path)
-            self.win.notify(tr("Created “{name}”").format(name=name))
+            self.win.notify(tr("Created “{name}”").format(name=esc(name)))
         self.accept()
 
 
@@ -1020,11 +1063,11 @@ class DiscDialog(Dialog):
     def __init__(self, win):
         super().__init__(win, "Open Disc", 640, 380, save_text="Play")
         self.win = win
-        drives = sysutil.optical_drives() or [win.store.get("optical_drive")]
+        saved = win.store.get("optical_drive")
+        drives = sysutil.optical_drives() or ([saved] if saved else [])
         self.kind = Dropdown([("dvd", "DVD"), ("bluray", "Blu-ray"), ("cdda", "Audio CD"), ("vcd", "Video CD")], "dvd",
                              height=44)
-        self.drive = Dropdown(drives, win.store.get("optical_drive") if win.store.get("optical_drive") in drives else drives[0],
-                              height=44)
+        self.drive = Dropdown(drives, saved if saved in drives else (drives[0] if drives else None), height=44)
         self.menus = Toggle()
         self.menus.setChecked(True)
         grid = QGridLayout()
@@ -1034,10 +1077,16 @@ class DiscDialog(Dialog):
             grid.addWidget(w, row, 1, Qt.AlignRight if isinstance(w, Toggle) else Qt.Alignment())
         grid.setColumnStretch(1, 1)
         self.body_lay.addLayout(grid)
+        if not drives:
+            # an empty drive list left Play offering "dvd://" — an action that cannot work
+            self.body_lay.addWidget(Label("No optical drive found on this computer.", 14, "text_3"))
+            self.save.setEnabled(False)
         self.body_lay.addStretch(1)
 
     def accept_clicked(self):
         kind, drive = self.kind.value, self.drive.value
+        if not drive:
+            return
         if kind == "dvd":
             mrl = f"{'dvd' if self.menus.isChecked() else 'dvdsimple'}://{drive}"
         elif kind == "bluray":
@@ -1076,11 +1125,11 @@ class CaptureDialog(Dialog):
         if self.mode.value == "screen":
             mrl = "screen://"
             opts = f":screen-fps={self.fps.value}"
-            name = "Desktop"
+            name = tr("Desktop")
         else:
             mrl = "dshow://"
             opts = ""
-            name = "Camera"
+            name = tr("Camera")
         self.win.engine.capture_options = [opts] if opts else []
         self.win.play([mrl], names={mrl: name})
         self.accept()
@@ -1101,6 +1150,7 @@ PROFILES = [
 class ConvertDialog(Dialog):
     def __init__(self, win, items):
         super().__init__(win, "Convert", 760, 440, save_text="Start")
+        self._cancelled = False           # a user's Stop is not a conversion failure
         self.win = win
         self.items = [i for i in items if not is_url(i)] or []
         self.body_lay.addWidget(section("Files", "\n".join(display_name(i) for i in self.items[:4]) +
@@ -1127,7 +1177,7 @@ class ConvertDialog(Dialog):
         self.save.setEnabled(bool(self.items) and bool(shutil.which("ffmpeg")))
         if not shutil.which("ffmpeg"):
             hint = "winget install ffmpeg"
-            self.status.setText(tr("Converting needs ffmpeg ({hint})").format(hint=hint))
+            self.status.setText(tr("Converting needs ffmpeg ({why}).").format(why=hint))
 
     def _browse(self):
         d = FileDialog.getExistingDirectory(self, "Save converted files to", os.path.expanduser("~/Videos"),
@@ -1140,14 +1190,19 @@ class ConvertDialog(Dialog):
         self.queue = list(self.items)
         self._failed = 0
         self._total = len(self.queue)
+        self._written = set()              # names this run produced (two sources may share one)
+        self._cancelled = False
         self.args, self.extn = prof[2], prof[3]
         self.save.setEnabled(False)
-        self.cancel.setText("Stop")
+        self.cancel.setText(tr("Stop"))
         self._next()
 
     def _next(self):
         if not self.queue:
-            self.cancel.setText("Close")
+            self.cancel.setText(tr("Close"))
+            if self._cancelled:
+                self.status.setText(tr("Stopped."))    # the user's own Stop: neither "done"
+                return                                 # nor "failed"
             if self._failed:
                 self.status.setText(tr("Finished with errors: {n} of {total} failed.")
                                     .format(n=self._failed, total=self._total))
@@ -1168,12 +1223,18 @@ class ConvertDialog(Dialog):
         out = os.path.join(folder, os.path.splitext(os.path.basename(src))[0] + "." + self.extn)
         if os.path.abspath(out) == os.path.abspath(src):
             out = os.path.splitext(out)[0] + "-converted." + self.extn
+        base, suffix = os.path.splitext(out)
+        n = 2
+        while out in self._written:        # two sources with the same name used to overwrite
+            out = f"{base}-{n}{suffix}"    # each other, and the loss was never mentioned
+            n += 1
+        self._written.add(out)
         self._out = out                     # remembered so a cancelled run can be cleaned up
         self._status = tr("Converting…")
         self.status.setText(self._status + " " + display_name(src))
         self.proc = QProcess(self)
         def done(code, _status):
-            if code:
+            if code and not self._cancelled:     # the user's own Stop is not a failure
                 self._failed += 1
                 self.status.setText(tr("Failed."))
             self._next()
@@ -1193,6 +1254,7 @@ class ConvertDialog(Dialog):
 
     def reject(self):
         if self.proc and self.proc.state() != QProcess.NotRunning:
+            self._cancelled = True
             self.queue = []
             self.proc.kill()
             self.proc.waitForFinished(2000)
@@ -1245,6 +1307,14 @@ class StreamDialog(Dialog):
         path = (self.path.text() or "/stream").strip()
         if not path.startswith("/"):
             path = "/" + path
+        import socket as _socket
+        try:                                   # a taken port: libVLC logs "socket bind error"
+            probe = _socket.socket()           # and serves nothing, so say it here rather than
+            probe.bind(("0.0.0.0", port))      # announcing a stream that never came up
+            probe.close()
+        except OSError:
+            self.address.setText(tr("Port {port} is already in use.").format(port=port))
+            return
         venc = f"vcodec=h264,venc=x264{{preset={s('stream_preset').lower()}" + \
             (f",tune={s('stream_tune').lower().replace(' ', '')}" if s("stream_tune") != "None" else "") + "}," \
             if s("stream_video") else "vcodec=none,"
@@ -1270,7 +1340,7 @@ class StreamDialog(Dialog):
             host = "this-computer"
         self.address.setText(f"http://{host}:{port}{path}")
         self.save.setEnabled(False)
-        self.cancel.setText("Stop")
+        self.cancel.setText(tr("Stop"))
         self.win.notify("Streaming started")
 
     def reject(self):
@@ -1305,11 +1375,13 @@ class PropertiesDialog(Dialog):
             while self.media.get_parsed_status() == 0 and time.time() - t0 < 3:
                 QApplication.processEvents()
                 time.sleep(0.02)
+        self.original = {}
         for row, (key, label) in enumerate(self.FIELDS):
             val = ""
             if self.media is not None:
                 v = self.media.get_meta(getattr(vlc.Meta, key))
                 val = v.decode() if isinstance(v, bytes) else (v or "")
+            self.original[key] = val
             f = Field("", val, height=34)
             f.setReadOnly(not editable)
             grid.addWidget(Label(label, 14, "text_2"), row, 0)
@@ -1332,13 +1404,16 @@ class PropertiesDialog(Dialog):
             except OSError:
                 pass
             if shutil.which("ffprobe"):
-                r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                try:                            # a probe slower than its timeout used to raise
+                    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                                     "format=duration,bit_rate:stream=codec_type,codec_long_name,width,height,"
                                     "r_frame_rate,channels,sample_rate:stream_tags=language,title", "-of", "json",
                                     self.item], capture_output=True, timeout=10,
-                                   creationflags=sysutil.quiet_process())
+                                       creationflags=sysutil.quiet_process())
+                except (OSError, subprocess.SubprocessError):
+                    r = None                    # no technical block, but the dialog still opens
                 try:
-                    data = json.loads(r.stdout or b"{}")
+                    data = json.loads(r.stdout or b"{}") if r is not None else {}
                     fmt = data.get("format", {})
                     if fmt.get("duration"):
                         out["Duration"] = fmt_time(float(fmt["duration"]) * 1000)
@@ -1368,10 +1443,25 @@ class PropertiesDialog(Dialog):
     def accept_clicked(self):
         import vlc
         if self.media is not None:
+            wrote = False
             for key, f in self.edits.items():
-                self.media.set_meta(getattr(vlc.Meta, key), f.text())
-            ok = self.media.save_meta()
-            self.win.notify("Metadata saved" if ok else "Couldn't write the tags to this file")
+                value = f.text().strip()
+                # only what the user actually typed: libVLC falls back to the file name for an
+                # empty Title, and writing every field back baked that name in as a real tag
+                if value != self.original.get(key, "") and (value or self.original.get(key)):
+                    self.media.set_meta(getattr(vlc.Meta, key), value)
+                    wrote = True
+            if not wrote:
+                self.accept()
+                return
+            before = _file_stamp(self.item)
+            self.media.save_meta()
+            # libVLC answers "saved" for a read-only file — and for a folder — while writing
+            # nothing, so believe the file itself
+            if _file_stamp(self.item) == before:
+                self.win.notify(tr("Couldn't write the tags to this file"))
+            else:
+                self.win.notify(tr("Metadata saved"))
             from .media import _key
             self.win.media._info.pop(_key(self.item), None)
         self.accept()
@@ -1383,6 +1473,16 @@ class PropertiesDialog(Dialog):
         super().done(r)
 
 
+def _file_stamp(path):
+    """(size, mtime) of a file, or None when there is none: used to tell whether a metadata
+    write really happened, since libVLC's own answer is not reliable."""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime)
+    except OSError:
+        return None
+
+
 def pretty_path(path):
     """A path with the home folder shortened and the separators spaced out for a tool box."""
     home = os.path.expanduser("~")
@@ -1390,11 +1490,67 @@ def pretty_path(path):
     return " / ".join(x for x in p.split(os.sep) if x)
 
 
+class PickRow(QWidget):
+    """video — "3 matching tracks, click to choose one": a row the matcher left open.
+
+    Reads like the rows around it but is a button: it opens the tracks that could belong to this
+    episode (three identically named dubs, say), which is where the user answers what the matcher
+    refused to guess."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, video, note):
+        super().__init__()
+        self.video, self.note = video, note
+        self.setFixedHeight(36)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._hover = False
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.pos()):
+            self.clicked.emit()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(c("field"))
+            p.drawRoundedRect(QRectF(self.rect()), 6, 6)
+            p.drawPixmap(self.width() - 34, 6, icons.pixmap("swap", 24))
+        p.drawPixmap(10, 6, icons.pixmap("audio", 24))
+        f = theme.font(14)
+        fm = QFontMetrics(f)
+        p.setFont(f)
+        half = int(self.width() * 0.55)
+        name = elide(os.path.basename(self.video), f, half - 50)
+        p.setPen(c("text"))
+        p.drawText(QRectF(46, 0, half - 50, 36), Qt.AlignVCenter, name)
+        x = 46 + fm.horizontalAdvance(name) + 14
+        p.setPen(c("text_2"))
+        p.drawText(QRectF(x, 0, self.width() - x - 40, 36), Qt.AlignVCenter,
+                   elide(self.note, f, self.width() - x - 40))
+
+
 class AudioTracksDialog(Dialog):
     """Match the audio files in a folder to its episodes by name and remember the pairs.
 
-    The tracks usually live in a subfolder ("RUS Sound"), so both the folder itself and its
-    first-level subfolders are searched."""
+    The tracks of a release live in folders of their own ("RUS Sound", and under it one folder
+    per dub), so those folders are listed with their track counts and the user ticks the ones to
+    take tracks from — that is what tells three identically named dubs apart, and the row shows
+    the folder its track came from. Opening the dialog again shows the folders the episodes'
+    tracks came from last time, so it opens on the user's own choice. The switch by the Add
+    button hands a track to the episode that is playing right now instead of waiting for it to
+    start again."""
 
     def __init__(self, win, target_path=None, items=None):
         self.win = win
@@ -1408,6 +1564,17 @@ class AudioTracksDialog(Dialog):
         th.addWidget(self.where, 1)
         super().__init__(win, "Match Audio Tracks", 900, 640, tools=tools, fill="base",
                          save_text="Add")
+        act = QWidget()
+        ah = QHBoxLayout(act)
+        ah.setContentsMargins(0, 0, 14, 0)
+        ah.setSpacing(10)
+        ah.addWidget(Label("Activate the track", 14, "text_2"))
+        self.activate = Toggle()
+        self.activate.setChecked(win.store.get("activate_matched_audio") is not False)
+        ah.addWidget(self.activate)
+        act.setToolTip(tr("Give the matched track to the episode playing right now, instead of "
+                          "applying it when that episode starts again."))
+        self.footer.layout().insertWidget(2, act)      # beside Add: it is what Add does
         self.items = items
         self.target_path = target_path or win.engine.current
         self.folder = None
@@ -1420,6 +1587,11 @@ class AudioTracksDialog(Dialog):
         self.body_lay.setContentsMargins(20, 10, 20, 0)
         self.body_lay.addWidget(scroll(self.list_host), 1)
         self.rows = {}                  # video -> (CheckRow, track)
+        self.picks = {}                 # video -> the tracks the matcher would not choose between
+        self.chosen = {}                # video -> the track the user picked by hand
+        self.skipped = set()            # videos the user left without a track
+        self.found = []                 # [(folder, tracks)] where tracks were found
+        self.checked = None             # folders to take tracks from (None: the first build)
         self.rebuild()
 
     def _videos(self):
@@ -1433,7 +1605,28 @@ class AudioTracksDialog(Dialog):
                                             options=self.win.dialog_options())
         if d:
             self.folder = d
+            self.checked = None         # another folder: its own folders, and what its episodes use
+            self.chosen.clear()
+            self.skipped.clear()
             self.rebuild()
+
+    def _folders(self):
+        """The ticked folders, in the order they are listed: that order is what decides between
+        two equal tracks of different folders, so it has to be the one the user sees."""
+        return [f for f, _ in self.found if f in (self.checked or ())]
+
+    def _tracks(self):
+        out = []
+        for folder in self._folders():
+            out += media_in_dir(folder, AUDIO_EXT)
+        return out
+
+    def _folder_toggled(self, folder, on):
+        if on:
+            self.checked.add(folder)
+        else:
+            self.checked.discard(folder)
+        self.rebuild()
 
     def rebuild(self):
         self.where.edit.setText(pretty_path(self.folder) if self.folder else tr("Choose a folder…"))
@@ -1442,29 +1635,92 @@ class AudioTracksDialog(Dialog):
             if w:
                 w.deleteLater()
         self.rows = {}
+        self.picks = {}
         videos = self._videos()
         if not videos:
             self.list_lay.addWidget(Label("No videos in this folder.", 14, "text_3"))
             self.list_lay.addStretch(1)
             self.save.setEnabled(False)          # nothing to match: Save must not offer itself
+            self.count_note(0)                   # the count was left over from the previous folder
             return
-        pairs = dict(match_audio_tracks(videos, [self.folder]))
-        found = 0
+        self.found = track_folders(self.folder) if self.folder else []
+        here = {f for f, _ in self.found}
+        if self.checked is None:
+            # The folders the episodes' own tracks come from: opening the dialog again shows the
+            # choice made last time (which dub, or which "RUS Sound") rather than every folder
+            # that happens to hold audio.
+            self.checked = self._stored_folders(videos, here) or set(here)
+        else:
+            self.checked &= here
+        if self.found:
+            self.list_lay.addWidget(Label("Folders with tracks", 14, "text_2"))
+            for folder, n in self.found:
+                row = CheckRow(f"{self._folder_name(folder)}   —   {trn('track', 'tracks', n)}",
+                               folder in self.checked, icon="folder")
+                row.setToolTip(folder)
+                row.toggled.connect(lambda on, f=folder: self._folder_toggled(f, on))
+                self.list_lay.addWidget(row)
+            self.list_lay.addSpacing(8)
+        else:
+            self.list_lay.addWidget(Label("No audio files in this folder.", 14, "text_3"))
+        self._episodes(videos)
+        self.save.setEnabled(bool(self.rows) or bool(self.skipped))
+        self.count_note(len(videos))
+        self.list_lay.addStretch(1)
+
+    def _stored_folders(self, videos, here):
+        """The folders of `here` the episodes' remembered tracks live in."""
+        want = set()
         for v in videos:
-            track = pairs.get(v)
+            for track in self.win.store.external_audio(v):
+                folder = os.path.dirname(track)
+                if folder in here:
+                    want.add(folder)
+        return want
+
+    def _episodes(self, videos):
+        """The episode rows, with the track each one gets: matched, left to the user to pick
+        (several tracks of the ticked folders look equally right), or none at all.
+
+        An episode that already has a track keeps it while its folder is one of the ticked ones —
+        the dialog opens on what the episodes use, so pressing Add again changes nothing. Untick
+        that folder and the episode is matched afresh, which is how a season moves to another
+        dub."""
+        tracks = self._tracks()
+        pairs = dict(match_audio_tracks(videos, self._folders())) if tracks else {}
+        for v in videos:
+            cands = track_candidates(v, tracks)
+            if v in self.skipped:
+                track = None
+            elif v in self.chosen:
+                track = self.chosen[v]
+            else:
+                stored = (self.win.store.external_audio(v) or [None])[-1]
+                track = stored if stored in cands else pairs.get(v)
             if track:
-                found += 1
-                name = f"{os.path.basename(v)}   —   {self._track_name(track)}"
-                row = CheckRow(name, True, icon="audio")
+                row = CheckRow(f"{os.path.basename(v)}   —   {self._track_name(track)}", True, icon="audio")
+                row.setToolTip(track)
                 self.rows[v] = (row, track)
                 self.list_lay.addWidget(row)
+                continue
+            if cands:
+                note = (tr("no track") if v in self.skipped
+                        else trn("matching track", "matching tracks", len(cands))) \
+                    + ", " + tr("click to choose")
+                row = PickRow(v, note)
+                row.setToolTip("\n".join(self._track_name(t) for t in cands))
+                row.clicked.connect(lambda v=v: self._choose(v))
+                self.picks[v] = cands
+                self.list_lay.addWidget(row)
             else:
-                lab = Label(f"{os.path.basename(v)}   —   " + tr("no matching track found"),
-                            14, "text_3")
-                self.list_lay.addWidget(lab)
-        self.save.setEnabled(bool(self.rows))
-        self.count_note(found, len(videos))
-        self.list_lay.addStretch(1)
+                self.list_lay.addWidget(Label(f"{os.path.basename(v)}   —   " + tr("no matching track found"),
+                                              14, "text_3"))
+
+    def _folder_name(self, folder):
+        """A path the user knows from Explorer — "RUS Sound/AniLibria", or the folder being
+        scanned itself — rather than a full one running off the edge of the list."""
+        rel = os.path.relpath(folder, self.folder) if self.folder else folder
+        return tr("This folder") if rel == "." else rel
 
     def _track_name(self, track):
         """The track's own folder relative to the one being scanned, when it is in a subfolder."""
@@ -1472,18 +1728,52 @@ class AudioTracksDialog(Dialog):
             return os.path.relpath(track, self.folder)
         return os.path.basename(track)
 
-    def count_note(self, found, total):
+    def _choose(self, video):
+        """The row the matcher left open: pick this episode's track by hand."""
+        items = [MenuItem(self._track_name(t), lambda t=t, v=video: self._pick(v, t), raw=True,
+                          checked=self.chosen.get(video) == t) for t in self.picks.get(video, [])]
+        items += [sep(), MenuItem("No track", lambda v=video: self._pick(v, None),
+                                  icon="remove", icon_variant="")]
+        PopupMenu(items, self, width=560, row=40).popup(QCursorPos())
+
+    def _pick(self, video, track):
+        if track is None:
+            self.chosen.pop(video, None)
+            self.skipped.add(video)
+        else:
+            self.skipped.discard(video)
+            self.chosen[video] = track
+        self.rebuild()
+
+    def count_note(self, total):
         self.title_label.setText(tr("Match Audio Tracks") +
                                  (f" — {trn('episode', 'episodes', total)}" if total else ""))
 
     def accept_clicked(self):
-        store = self.win.store
+        store, engine = self.win.store, self.win.engine
+        store.set("activate_matched_audio", self.activate.isChecked())
+        saved, touched = 0, False
         for video, (row, track) in self.rows.items():
-            if row.checked:
-                store.set_external_audio(video, [track])
-            elif store.external_audio(video) == [track]:
+            # a file that disappeared between the scan and Add is not remembered as this
+            # episode's track (the store filters those out on read, so it was a dead entry)
+            want = [track] if row.checked and os.path.exists(track) else []
+            saved += 1 if want else 0
+            if store.external_audio(video) != want:
+                store.set_external_audio(video, want)
+                touched = touched or video == engine.current
+        for video in self.skipped:
+            if store.external_audio(video):
                 store.set_external_audio(video, [])
-        self.win.notify(trn("audio track remembered", "audio tracks remembered", len(self.rows)))
+                touched = touched or video == engine.current
+        self.win.notify(trn("audio track remembered", "audio tracks remembered", saved) if saved
+                        else tr("Added audio tracks cleared"))
+        if touched and self.activate.isChecked() and engine.is_active():
+            # The episode playing right now: its new track takes over at once (the others get
+            # theirs when they start, see engine._start_item)
+            if store.external_audio(engine.current):
+                engine.start_external_audio()
+            else:
+                engine.stop_external_audio()
         self.accept()
 
 
@@ -1548,9 +1838,21 @@ class HomeDialog(Dialog):
 class MessageDialog(Dialog):
     def __init__(self, win, title, text, detail="", ok="OK", cancel="Cancel"):
         super().__init__(win, title, 520, 220, save_text=ok, cancel_text=cancel)
-        self.body_lay.addWidget(Label(text, 16, "text_hi", wrap=True))
-        if detail:
-            self.body_lay.addWidget(Label(detail, 14, "text_2", wrap=True))
-        self.body_lay.addStretch(1)
+        # plain text: the messages carry user data (a playlist's name, a path), and QLabel would
+        # otherwise read it as markup
+        # A long message (an error with a path in it, a playlist named by the user) used to be
+        # cut off mid-word with no way to read or copy the rest: the body scrolls instead.
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        for value, size, colour in ((text, 16, "text_hi"), (detail, 14, "text_2")):
+            if not value:
+                continue
+            line = Label(value, size, colour, wrap=True)
+            line.setTextFormat(Qt.PlainText)
+            lay.addWidget(line)
+        lay.addStretch(1)
+        self.body_lay.addWidget(scroll(body), 1)
         if not cancel:
             self.cancel.hide()

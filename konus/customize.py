@@ -14,7 +14,7 @@ from .controls import CUSTOMIZE_ORDER, ELEMENTS, LOCKED, REPEATABLE
 from .i18n import tr
 from .store import ALT_LAYOUT, DEFAULT_LAYOUT
 from .theme import c
-from .widgets import Button, Customizable, Label, paint_shadow
+from .widgets import Button, Customizable, Label, clamp_position, clamp_to_screen, paint_shadow, scroll
 
 MIME = "application/x-konus-element"
 
@@ -361,7 +361,9 @@ class CustomizeDialog(QDialog):
         self.grid.setContentsMargins(20, 20, 20, 10)
         self.grid.setHorizontalSpacing(0)
         self.grid.setVerticalSpacing(12)
-        outer.addWidget(self.grid_host, 1)
+        # scrolling: on a clamped card the palette needs more rows than the height holds, and
+        # Qt squeezed them on top of each other instead of letting the user scroll
+        outer.addWidget(scroll(self.grid_host), 1)
         foot = QHBoxLayout()
         foot.setContentsMargins(20, 10, 20, 20)
         cancel = Button("Cancel", "face", height=32)
@@ -394,16 +396,32 @@ class CustomizeDialog(QDialog):
                 w.deleteLater()
         used = self.ctrl.used()
         tiles = [e for e in CUSTOMIZE_ORDER if e in REPEATABLE or e not in used]
+        # the columns follow the card's width: nine at the design size, fewer when the card is
+        # clamped on a small screen — the tiles keep their own size either way, and used to
+        # overlap by a third of their width when the width shrank
+        cols = max(3, (self.width() - 60) // 116)
+        self.tile_cols = cols
         for i, eid in enumerate(tiles):
-            self.grid.addWidget(ElementTile(eid, self), i // 9, i % 9)
+            self.grid.addWidget(ElementTile(eid, self), i // cols, i % cols)
 
     def showEvent(self, e):
+        clamp_to_screen(self)              # first: the tiles' columns follow the real width
         self.ctrl.rebuild()
         self.refresh_tiles()
-        par = self.win
+        par = self.win                     # the widest card in the app: on a small screen its
+                                           # own footer was off the bottom
         g = par.frameGeometry()
-        self.move(g.center().x() - self.width() // 2, g.top() + max(40, (g.height() - self.height()) // 2 - 60))
+        self.move(g.center().x() - self.width() // 2,
+                  max(0, g.top() + max(40, (g.height() - self.height()) // 2 - 60)))
+        clamp_position(self)
         super().showEvent(e)
+
+    def resizeEvent(self, e):
+        # the tile grid follows the card's width: fewer columns when it is clamped, so the fixed
+        # 110 px tiles never overlap each other
+        if getattr(self, "tile_cols", 9) != max(3, (self.width() - 60) // 116):
+            self.refresh_tiles()
+        super().resizeEvent(e)
 
     def exec_(self):
         self.setWindowModality(Qt.NonModal)

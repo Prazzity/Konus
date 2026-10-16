@@ -10,7 +10,8 @@ at once, so the file is readable even if the window is closed by force.
 import os
 import time
 
-_PATH = os.environ.get("VLC_DIAG_LOG") or ""
+#: The documented name, and the one earlier builds looked for.
+_PATH = os.environ.get("KONUS_DIAG_LOG") or os.environ.get("VLC_DIAG_LOG") or ""
 _FILE = None
 
 

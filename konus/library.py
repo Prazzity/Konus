@@ -27,7 +27,7 @@ from . import icons, tasks, theme
 from .engine import (AUDIO_EXT, MEDIA_EXT, VIDEO_EXT, display_name, ext, fmt_short, is_audio, is_url, media_in_dir,
                      natural_key)
 from .theme import c
-from .widgets import HLine, IconButton, Label, MenuItem, PopupMenu, elide, sep, wants_list_key
+from .widgets import HLine, IconButton, Label, MenuItem, PopupMenu, elide, esc, sep, wants_list_key
 from .filedialog import FileDialog
 
 HOME_SECTIONS = ["Continue Watching", "Listen Again", "Frequently Visited Folders", "Frequently Visited Playlists",
@@ -369,17 +369,18 @@ class LibraryModel(QObject):
 
     # playlists
     def _playlist(self, p):
-        return E("playlist", p["name"], tr_name=False, ref=p["id"], icon="playlist", loc=("playlists", p["id"]), items=list(p["items"]),
-                 sub=trn("item", "items", len(p['items'])), thumb=p.get("thumb") or None,
+        items = [i for i in p["items"] if is_url(i) or os.path.exists(i)]
+        return E("playlist", p["name"], tr_name=False, ref=p["id"], icon="playlist", loc=("playlists", p["id"]), items=items,
+                 sub=trn("item", "items", len(items)), thumb=p.get("thumb") or None,
                  image=p.get("thumb") or None)
 
     def _e_playlists(self, loc):
         if len(loc) == 1:
             out = [E("add", "Create playlist", ref="playlist")]
             if self.store["favorites"]:
+                fav = [i for i in self.store["favorites"] if is_url(i) or os.path.exists(i)]
                 out.append(E("favorites", "Favorites", icon="favorite", loc=("playlists", "favorites"),
-                             items=list(self.store["favorites"]),
-                             sub=trn("item", "items", len(self.store['favorites']))))
+                             items=fav, sub=trn("item", "items", len(fav))))
             out.extend(self._playlist(p) for p in self.store.playlists())
             return out
         if loc[1] == "favorites":
@@ -950,7 +951,7 @@ class Library(QObject):
         HomeDialog(self).exec_()
 
     def home_menu(self, title=None):
-        items = [MenuItem(tr("Hide “{name}”").format(name=title),
+        items = [MenuItem(tr("Hide “{name}”").format(name=tr(title)),
                           lambda: self.set_home_section(title, False), icon="ui")] if title else []
         return items + [MenuItem("Customize Home…", self.customize_home, icon="paint")]
 
@@ -1138,28 +1139,51 @@ class Library(QObject):
                     return
                 self.store.add_to_playlist(pid, its)
                 w.notify(tr("Added {n} to {name}").format(
-                    n=len(its), name=self.store.playlist(pid)["name"]))
+                    n=len(its), name=esc(self.store.playlist(pid)["name"])))
             self._expand_async(entries, done)
 
         out = [MenuItem("New Playlist…", lambda: self._expand_async(entries, w.new_playlist),
                         icon="add", icon_variant="")]
         for pl in self.store.playlists():
-            out.append(MenuItem(pl["name"], lambda pid=pl["id"]: add_to(pid), icon="playlist"))
+            out.append(MenuItem(pl["name"], lambda pid=pl["id"]: add_to(pid), icon="playlist", raw=True))
         return out
 
     def context_menu(self, entries, gpos, view):
         w = self.win
-        e = entries[0]
-        kind = e["kind"]
-        if kind == "add" or kind in ("header", "empty", "category"):
+        # a header, an "add" tile or a category row has no menu of its own: the menu belongs to
+        # what else is selected — unless there is nothing else
+        usable = [en for en in entries if en["kind"] not in ("add", "header", "empty", "category")]
+        if not usable:
             return
+        e = usable[0]
+        kind = e["kind"]
         # Folder contents are walked in the background when an action runs; for every
         # other kind the item list is already known and cheap to collect.
-        items = None if kind == "folder" else [i for en in entries for i in self.model.playable(en)]
-        later = (lambda fn: (lambda: self._expand_async(entries, fn))) if items is None else None
+        # A folder in the selection is walked in the background for the actions that mean it;
+        # for a mixed selection (a folder plus files) there is no single meaning, and the file
+        # actions used to run over the folder's whole contents — which the menu never said.
+        folders = [en for en in entries if en["kind"] == "folder"]
+        mixed = bool(folders) and len(folders) != len(entries)
+        files_in = [en for en in entries if en["kind"] in ("media", "stream")]
+        if mixed and files_in:
+            # a selection of folders and files has no folder meaning: the file actions are the
+            # ones that make sense, and they run over the files in the selection only. `e` has to
+            # be one of those files — a folder, a playlist tile or a Home tile has no file behind
+            # it, and acting on its id or its name was wrong (a config entry for "pl1699…" and an
+            # Explorer window on the library folder)
+            kind = "media"
+            e = files_in[0]
+        elif mixed:
+            # nothing but folders and lists in the selection: the folder menu, over the folder
+            kind = "folder"
+            e = folders[0]
+        walk_folder = kind == "folder"
+        items = None if walk_folder else \
+            [i for en in entries if en["kind"] != "folder" for i in self.model.playable(en)]
+        later = (lambda fn: (lambda: self._expand_async(entries, fn))) if walk_folder else None
         menu = []
         if kind in ("media", "stream"):
-            ref = e["ref"]
+            ref = e.get("ref")
             watched = self.store.watched(ref)
             menu = [MenuItem("Play", lambda: self.activate(e, view), icon="playback"),
                     MenuItem("Mark as Unwatched" if watched else "Mark as Watched",
@@ -1172,13 +1196,18 @@ class Library(QObject):
                     MenuItem("Add to Queue", lambda: w.enqueue(items), icon="queue"),
                     MenuItem("Add to Playlist", icon="playlist", submenu=lambda: w.playlist_submenu(items)),
                     MenuItem("Show in File Explorer", lambda: w.show_in_folder(ref), icon="folder",
-                             enabled=not is_url(ref)),
+                             enabled=bool(ref) and not is_url(ref)),
                     MenuItem("Go to Source", lambda: self.show_folder(ref), icon="arrow",
-                             icon_variant="direction=right,two-tone=yes", enabled=not is_url(ref)),
+                             icon_variant="direction=right,two-tone=yes",
+                             enabled=bool(ref) and not is_url(ref)),
+                    # a mixed selection may hold a row with no file behind it (a Home tile):
+                    # every entry that needs one is off then
                     MenuItem("Add Subtitle Tracks", lambda: w.open_add_subtitles(ref), icon="subtitles",
-                             enabled=kind == "media" and not is_audio(ref)),
-                    MenuItem("Add Audio Tracks", lambda: w.add_audio_tracks(ref), icon="audio", enabled=kind == "media"),
-                    MenuItem("Properties & Metadata", lambda: w.show_properties(ref), icon="info")]
+                             enabled=bool(ref) and not is_audio(ref)),
+                    MenuItem("Add Audio Tracks", lambda: w.add_audio_tracks(ref), icon="audio",
+                             enabled=bool(ref)),
+                    MenuItem("Properties & Metadata", lambda: w.show_properties(ref), icon="info",
+                             enabled=bool(ref))]
             if e.get("in_playlist") or (self.loc[0] == "playlists" and len(self.loc) == 2):
                 pid = self.loc[1]
                 menu.append(sep())
@@ -1252,7 +1281,7 @@ class Library(QObject):
 
     def _delete_playlist(self, pid):
         pl = self.store.playlist(pid)
-        if self.win.confirm(tr("Delete the playlist “{name}”?").format(name=pl["name"]),
+        if self.win.confirm(tr("Delete the playlist “{name}”?").format(name=esc(pl["name"])),
                             tr("The files themselves are not deleted.")):
             self.store.remove_playlist(pid)
             if self.loc[:2] == ("playlists", pid):

@@ -15,11 +15,10 @@ from PyQt5.QtWidgets import (QAbstractItemView, QFileDialog, QLabel, QSizePolicy
 
 from .i18n import tr, trn, tr_opts
 from . import icons, prefs, theme
-from .engine import (SLEEP_OPTIONS, STEREO_LABELS, STEREO_MODES, display_name, fmt_ms, fmt_short, fmt_total,
-                     is_url)
+from .engine import (FX_SETTING, SLEEP_OPTIONS, STEREO_LABELS, STEREO_MODES, display_name, fmt_ms, fmt_short,
+                     fmt_total, is_url)
 from .theme import c
-from .widgets import (Button, ColorField, Dropdown, Expander, HLine, IconButton, Label, MenuItem, NumberField,
-                      PopupMenu, Segmented, Slider, Tabs, Toggle, VSlider, clear_layout, elide, sep, wants_list_key)
+from .widgets import (Button, ColorField, Dropdown, Expander, HLine, IconButton, Label, MenuItem, NumberField, PopupMenu, Segmented, Slider, Tabs, Toggle, VSlider, clear_layout, elide, esc, sep, wants_list_key)
 from .filedialog import FileDialog
 
 PANEL_W = 400
@@ -349,11 +348,12 @@ class TracksPanel(Panel):
             for lst in (self.vlist, self.alist, self.slist, self.xlist):
                 lst.set_items([], None)
             return
-        vt = [(-1, "None")] + [(i, n) for i, n in e.video_tracks() if i != -1]
+        vt = [(-1, tr("None"))] + [(i, n) for i, n in e.video_tracks() if i != -1]
         self.vlist.set_items(vt, e.video_track())
-        at = [(-1, "None")] + [(i, n) for i, n in e.audio_tracks() if i != -1]
+        at = [(-1, tr("None"))] + [(i, n) for i, n in e.audio_tracks() if i != -1]
         self.alist.set_items(at, e.audio_track())
-        devs = [(None, "System default")] + [(d, desc) for d, desc in e.audio_devices()]
+        # libVLC lists ("", "Default") of its own, which is the same thing as the first row
+        devs = [(None, tr("System default"))] + [(d, desc) for d, desc in e.audio_devices() if d]
         cur = e.audio_device() or None
         if cur not in [d for d, _ in devs]:
             cur = None
@@ -364,7 +364,7 @@ class TracksPanel(Panel):
         embedded = tracks[:len(tracks) - n_ext] if n_ext else tracks
         external = list(zip([t[0] for t in tracks[len(tracks) - n_ext:]], [os.path.basename(x) for x in ext[-n_ext:]])) \
             if n_ext else []
-        self.slist.set_items([(-1, "None")] + embedded, e.spu())
+        self.slist.set_items([(-1, tr("None"))] + embedded, e.spu())
         self.xlist.set_items(external, e.spu())
         self.xempty.setVisible(not external)
 
@@ -427,6 +427,15 @@ class SettingsPanel(Panel):
         self._update_presets()
 
     def _set(self, key, value):
+        """Whatever the panel edits is also a setting, under its own Settings key: the panel
+        calls it "hue" while the store calls it "pic_hue". The engine builds its fx values from
+        the store at startup, so a panel-only change was lost at the next start — and the
+        Settings dialog went on showing the old value."""
+        setting = key if key in prefs.DEFAULTS else FX_SETTING.get(key)
+        if setting:
+            self.store.set(setting, value)
+        if key in ("eq_preset", "eq_bands", "eq_2pass"):
+            self.store.set("eq_enabled", True)      # what changing a preset means
         self.engine.set_fx(key, value)
 
     def _update_sub_note(self, *_):
@@ -786,17 +795,19 @@ class SettingsPanel(Panel):
         self._bind("sub_size", lambda v, s=s, vt=vt: (s.set_value(sizes.index(v) if v in sizes else 0),
                                                       vt.setText(v.replace("Automatic", "Auto"))))
         outs = ["None", "Thin", "Normal", "Thick"]
-        s2 = Slider(0, 3, outs.index(self.engine.fx["outline"]), 1, ticks=4, thumb="accent_2")
-        vt2 = rb.slider_row("Outline Thickness", s2, value_text=self.engine.fx["outline"])
+        cur_out = self.engine.fx["outline"] if self.engine.fx["outline"] in outs else "Normal"
+        s2 = Slider(0, 3, outs.index(cur_out), 1, ticks=4, thumb="accent_2")
+        vt2 = rb.slider_row("Outline Thickness", s2, value_text=cur_out)
         s2.released.connect(lambda v: self._set("outline", outs[int(v)]))
         s2.changed.connect(lambda v: vt2.setText(outs[int(v)]))
-        self._bind("outline", lambda v, s2=s2, vt2=vt2: (s2.set_value(outs.index(v)), vt2.setText(v)))
+        self._bind("outline", lambda v, s2=s2, vt2=vt2: (s2.set_value(outs.index(v) if v in outs else outs.index("Normal")),
+                                                        vt2.setText(v)))
         self.rel_box = rb
         f.widget(rb)
         # pixel sizes
         pb = Form(side=0)
         pb.lay.setContentsMargins(0, 0, 0, 0)
-        self.number_row(pb, "Font Size", "sub_px", 8, 200, 1, 0, "px")
+        self.number_row(pb, "Font size in pixels", "sub_px", 8, 200, 1, 0, "px")
         self.number_row(pb, "Outline Thickness", "outline_px", 0, 3, 1, 0, "px")
         self.px_box = pb
         f.widget(pb)
@@ -853,7 +864,7 @@ class PresetDropdown(QWidget):
         items = [MenuItem("New Preset", self._new, icon="add", icon_variant="")]
         for name in sorted(self.store.presets()):
             items.append(MenuItem(name, lambda n=name: self._apply(n), icon="more", icon_variant="",
-                                  checked=(name == self.current()),
+                                  checked=(name == self.current()), raw=True,
                                   submenu=lambda n=name: [
                                       MenuItem("Apply", lambda: self._apply(n)),
                                       MenuItem("Save current settings here", lambda: self._overwrite(n)),
@@ -875,7 +886,7 @@ class PresetDropdown(QWidget):
         if folder:
             self.store.set_folder_preset(folder, None if name == "Default Preset" else name)
         self.update()
-        self.panel.win.notify(tr("Preset: {name}").format(name=name))
+        self.panel.win.notify(tr("Preset: {name}").format(name=esc(name)))
 
     def _new(self):
         base = os.path.basename(self._folder() or "") or tr("Custom")
@@ -889,21 +900,24 @@ class PresetDropdown(QWidget):
 
     def _overwrite(self, name):
         self.store.save_preset(name, self.engine.preset_values())
-        self.panel.win.notify(tr("Saved to {name}").format(name=name))
+        self.panel.win.notify(tr("Saved to {name}").format(name=esc(name)))
 
     def _rename(self, name):
         new, ok = QInputDialog.getText(self.panel.win, tr("Rename Preset"), tr("Name:"), text=name)
         if ok and new.strip() and new.strip() != name:
-            vals = self.store.presets().get(name)
-            self.store.remove_preset(name)
-            self.store.save_preset(new.strip(), vals)
-            if self.current() == name:
+            # through the store, so every folder bound to this preset stays bound (the old
+            # remove+save pair quietly unbound them all)
+            renamed = self.store.rename_preset(name, new)
+            if self.current() == name and renamed:
                 self.engine.current_preset = new.strip()
 
     def _delete(self, name):
         self.store.remove_preset(name)
         if self.current() == name:
+            # the preset is gone but its values were still in force: back to the defaults, or the
+            # player keeps settings the user cannot find anywhere any more
             self.engine.current_preset = "Default Preset"
+            self.engine.apply_preset("Default Preset")
         self.update()
 
     def paintEvent(self, e):
@@ -916,7 +930,7 @@ class PresetDropdown(QWidget):
         p.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 4, 4)
         p.setFont(theme.font(14))
         p.setPen(c("text"))
-        p.drawText(QRectF(16, 0, self.width() - 60, self.height()), Qt.AlignVCenter, tr(self.current()))
+        p.drawText(QRectF(16, 0, self.width() - 60, self.height()), Qt.AlignVCenter, self.current())
         p.drawPixmap(self.width() - 16 - 24, (self.height() - 24) // 2, icons.pixmap("chevron-up", 24))
 
 
@@ -964,8 +978,10 @@ class QueueDelegate(QStyledItemDelegate):
         p.drawText(r.adjusted(0, 0, -4, 0), Qt.AlignVCenter | Qt.AlignRight, dur)
         p.setPen(theme.accent_text() if current else c("text"))
         name = e.names.get(item) or display_name(item)
+        # elided in the middle: the end of a release name is the episode number, which is the
+        # only thing that tells one row of a series from the next
         p.drawText(QRectF(r.left() + 42, r.top(), r.width() - 42 - dw - 14, r.height()), Qt.AlignVCenter,
-                   elide(name, f, r.width() - 42 - dw - 14))
+                   elide(name, f, r.width() - 42 - dw - 14, Qt.ElideMiddle))
         p.restore()
 
 
@@ -1242,7 +1258,7 @@ class QueuePanel(Panel):
             last_folder = None
             for i, item in enumerate(e.items):
                 if tree and len(folders) > 1:
-                    folder = os.path.dirname(item) if not is_url(item) else "Network"
+                    folder = os.path.dirname(item) if not is_url(item) else tr("Network")
                     if folder != last_folder:
                         h = QListWidgetItem(os.path.basename(folder) or folder)
                         h.setData(ROLE_KIND, "header")

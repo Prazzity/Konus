@@ -38,10 +38,13 @@ Anime and series rips are work. The audio often isn't inside the video files —
 tracks next to the episodes, one per episode. The subtitles are loose `.srt` files whose names don't quite match
 the episodes they belong to. And every episode needs the same picture and sound settings picked all over again.
 
-**Match tracks to the folder.** Sound → *Match tracks to the folder…* reads the whole folder, pairs each episode
-with its own audio track by episode number and name, shows you what it found, and remembers the pairs. From then
-on every episode plays with its own track — and an episode you add to that folder later is matched as soon as you
-play it. The tracks can sit next to the episodes or in a subfolder, which is where they usually are.
+**Match tracks to the folder.** Sound → *Match tracks to the folder…* reads the folder — and its subfolders,
+however deep the release buries them — and pairs each episode with its own audio track by episode number and name.
+The folders the tracks were found in are listed at the top, each with its track count: the ticks say which ones to
+take tracks from, so when a release ships two or three dubs whose files are named identically, the folder you tick
+is the one you get. Every row shows the track that episode got and the folder it came from. The *Activate the track*
+switch beside Add (on by default) gives the matched track to the episode that is playing right now; the rest pick
+theirs up when they start, as does an episode you copy into that folder later.
 
 ![Matching audio tracks to the episodes of a folder](screenshots/tracks.jpg)
 

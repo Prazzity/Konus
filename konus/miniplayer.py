@@ -5,12 +5,12 @@ never restarts."""
 import os
 
 from PyQt5.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter
+from PyQt5.QtGui import QColor, QCursor, QFontMetrics, QPainter
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QVBoxLayout, QWidget
 
 from . import icons, theme
 from .engine import display_name, is_url
-from .i18n import trn
+from .i18n import tr, trn
 from .panels import QueueList, ROLE_INDEX, ROLE_KIND
 from .theme import c
 from .widgets import IconButton, Label, elide, paint_shadow
@@ -53,7 +53,9 @@ class MetaChip(QWidget):
     def set_text(self, t):
         self.text = t
         self.setVisible(bool(t))
-        self.setFixedWidth(min(150, 34 + self.fontMetrics().horizontalAdvance(t) + 8))
+        # measured with the font it is painted in (16), or a chip the size of its 14 px text
+        # elides the name it was made for
+        self.setFixedWidth(min(150, 34 + QFontMetrics(theme.font(16)).horizontalAdvance(t) + 8))
         self.update()
 
     def paintEvent(self, e):
@@ -347,15 +349,44 @@ class MiniPlayer(QWidget):
             if r.contains(gpos) and not self.overlay.isVisible():
                 self.overlay.show_over(r)
 
+    def fit_height(self, available):
+        """The card in the corner of the library has to fit the page it sits in: with the queue
+        open it is ~740 px tall, and in a 600 px window that put the queue header, the meta chips
+        and the queue button outside the page, where nothing could reach them. First the queue
+        list gives way, then the picture does — those chips and buttons are what the user needs."""
+        # free sizing first: the previous call may have pinned the height, and a pinned card
+        # cannot be measured again — it grew back and pushed its own buttons off the page
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        self.qlist.setFixedHeight(0)                 # measure the card without its list
+        self.holder.setFixedSize(self.holder.width(), 211)
+        self.layout().activate()
+        self.adjustSize()
+        extra = self.height()
+        if self.queue_box.isVisible():
+            room = available - extra - 8
+            self.qlist.setFixedHeight(max(0, min(260, room)))
+            extra += self.qlist.height()
+        # whatever the page has left goes to the picture: with the queue closed the card used to
+        # keep its 381 px and push the chips and the queue button outside the page
+        room = available - extra - 8
+        holder = max(60, min(211, 211 + room)) if room < 0 else 211
+        self.holder.setFixedSize(self.holder.width(), holder)
+        self.layout().activate()
+        self.adjustSize()
+        if self.height() > available:
+            self.setFixedHeight(available)       # never taller than the page it sits in
+
     def refresh(self):
         e = self.engine
         item = e.current
-        self.name.setText(elide(e.file_title() if item else "", theme.font(16), 360))
-        if item and not is_url(item):
-            self.folder.set_text(os.path.basename(os.path.dirname(item)))
-        else:
-            self.folder.set_text("")
-        self.artist.set_text(e.artist() or (os.path.basename(os.path.dirname(item)) if item and not is_url(item) else ""))
+        # a file/tag name is user data: set_raw, or a song called "Speed" reads «Скорость»
+        self.name.set_raw(elide(e.file_title() if item else "", theme.font(16), 360))
+        folder = os.path.basename(os.path.dirname(item)) if item and not is_url(item) else ""
+        artist = e.artist() if item else ""
+        self.folder.set_text(folder)
+        # with no artist the second chip has nothing to add — it used to repeat the folder name
+        self.artist.set_text(artist if artist and artist != folder else "")
         audio_only = bool(item) and not e.has_video
         if audio_only:
             cover = e.artwork() or (self.win.media.cover_path(item) if not is_url(item) else "")
@@ -413,7 +444,7 @@ class PipWindow(QWidget):
     def __init__(self, win):
         super().__init__(None, Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.win = win
-        self.setWindowTitle("Picture in Picture")
+        self.setWindowTitle(tr("Picture in Picture"))
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
         self.setStyleSheet("background: #000000;")

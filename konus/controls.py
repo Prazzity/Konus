@@ -256,6 +256,17 @@ class Bar(QWidget):
         self.top_line = top_line
         self.setAttribute(Qt.WA_StyledBackground, False)
 
+    def wire_seek(self):
+        """A seek bar works in whichever bar holds it: the layout editor lets the user drag it
+        into a title bar, where it used to be built and drawn but never connected."""
+        for w in getattr(self, "widgets", []):
+            if getattr(w, "element_id", None) == "seek" and hasattr(w, "seek"):
+                sb = w.seek
+                sb.hovered.connect(lambda frac, pos, bar=self: self.a.seek_hover(frac, pos, bar))
+                sb.left.connect(self.a.seek_hover_end)
+                sb.scrubbed.connect(self.a.scrub)
+                sb.seekRequested.connect(self.a.seek_fraction)
+
     def paintEvent(self, e):
         p = QPainter(self)
         if not self.overlay:
@@ -531,7 +542,8 @@ class TitleBar(Bar):
         self.left = QHBoxLayout()
         self.center = QHBoxLayout()
         self.right = QHBoxLayout()
-        grid = QGridLayout(self)
+        self.grid = QGridLayout(self)
+        grid = self.grid
         grid.setContentsMargins(6, 6, 6, 6)
         grid.setHorizontalSpacing(10)
         lw = QWidget()
@@ -559,6 +571,9 @@ class TitleBar(Bar):
         grid.setColumnStretch(2, 1)
         self.zones = {"title_left": self.left, "title_center": self.center, "title_right": self.right}
         self.zone_widgets = {"title_left": lw, "title_center": cw, "title_right": rw}
+        # where each zone sits inside its own row layout: the element's stretch only counts if the
+        # layout holding it is the one that grows
+        self.zone_hosts = {"title_left": (lh, 1), "title_center": (ch, 1), "title_right": (rh, 1)}
         self.factory = Elements(self, actions)
 
     def build(self, layout):
@@ -575,9 +590,21 @@ class TitleBar(Bar):
                 if prev is not None:
                     lay.addSpacing(gap_between(prev, eid) if zone != "title_right" else 0)
                 w = self.factory.make(eid, zone)
-                lay.addWidget(w, 1 if eid == "spacer" else 0, Qt.AlignVCenter)
+                # the seek is the one element that fills what it is given, in a title bar too
+                lay.addWidget(w, 1 if eid in ("spacer", "seek") else 0, Qt.AlignVCenter)
                 self.widgets.append(w)
                 prev = eid
+        self.wire_seek()
+        # the zone holding the seek is the one that has to grow: the zones are separate widgets
+        # in a grid, so the element's own stretch factor never hands it any room
+        for idx, zone in enumerate(("title_left", "title_center", "title_right")):
+            holds_seek = any(getattr(w, "element_id", None) == "seek"
+                             for w in self.zone_widgets[zone].findChildren(QWidget))
+            self.grid.setColumnStretch(idx, 3 if holds_seek else (0 if idx == 1 else 1))
+            host, pos = self.zone_hosts[zone]
+            # the zone holding the seek takes the room; the stretches around it give way
+            for i in range(host.count()):
+                host.setStretch(i, (1 if i == pos else 0) if holds_seek else (0 if i == pos else 1))
 
     def elements(self, eid):
         return [w for w in self.widgets if getattr(w, "element_id", None) == eid]
@@ -618,16 +645,22 @@ class ControlBar(Bar):
             w.hide()
             w.deleteLater()
         self.widgets = []
+        rows = [r for r in rows if [eid for eid in r if eid != "spacer"]] or rows[:1]
         while self.rows_lay.count():
             item = self.rows_lay.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        kept = 0
         for row in rows:
+            if not [eid for eid in row if eid != "spacer"]:
+                continue                     # nothing in it, and nothing to drag out again
             rw = QWidget()
             rw.setFixedHeight(54)
             self._build_row(rw, row)
             self.rows_lay.addWidget(rw)
-        self.setFixedHeight(54 * max(1, len(rows)))
+            kept += 1
+        self.setFixedHeight(54 * max(1, kept))
+        self.wire_seek()                 # once per bar, not once per row
 
     def _build_row(self, host, ids):
         segments = [[]]
@@ -679,13 +712,8 @@ class ControlBar(Bar):
             grid.setColumnStretch(0, 1)
             grid.setColumnStretch(1, 0 if "seek" not in center else 3)
             grid.setColumnStretch(2, 1)
-        for w in self.widgets:
-            if getattr(w, "element_id", None) == "seek":
-                sb = w.seek
-                sb.hovered.connect(self._seek_hover)
-                sb.left.connect(self._seek_leave)
-                sb.scrubbed.connect(self.a.scrub)
-                sb.seekRequested.connect(self.a.seek_fraction)
+        # the seek is wired once, at the end of build(): wiring it per row connected it again
+        # for every row of the layout, and one click then scrubbed twice
 
     def elements(self, eid):
         return [w for w in self.widgets if getattr(w, "element_id", None) == eid]
@@ -727,10 +755,13 @@ class SeekPreview(FloatingCard):
         self.MARGIN = 14
         self._lay.setContentsMargins(14, 14, 14, 14)
 
-    def show_at(self, gx, gy_top, text, pm):
+    def show_at(self, gx, gy_top, text, pm, below=False):
         """Show the card for the time under the pointer. Its size only ever changes with the
         video's aspect: while the next frame is still being cut from the file the previous
-        one stays, so sliding along the bar doesn't make the card jump between two sizes."""
+        one stays, so sliding along the bar doesn't make the card jump between two sizes.
+
+        `below` puts it under the bar instead of over it — a seek in a title bar has no room
+        above, and the card was drawn off the top of the screen."""
         self.text = text
         if pm is not None:
             self.pm = pm
@@ -742,7 +773,8 @@ class SeekPreview(FloatingCard):
         cw, ch = iw + 12, ih + 12 + 26
         m = self.MARGIN
         want = QSize(cw + 2 * m, ch + 2 * m)
-        pos = QPoint(int(gx - want.width() / 2), int(gy_top - want.height() + m - 8))
+        y = gy_top + 8 - m if below else gy_top - want.height() + m - 8
+        pos = QPoint(int(gx - want.width() / 2), int(y))
         if self.size() != want:
             self.resize(want)
         if self.pos() != pos:

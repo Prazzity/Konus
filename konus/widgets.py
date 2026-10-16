@@ -43,6 +43,47 @@ def paint_shadow(p, rect, radius, spread=14, alpha=0.38, dy=6):
     p.restore()
 
 
+def clamp_position(widget, margin=0):
+    """Keep a window inside the screen it is on (a dialog centred on a window in the lower half
+    of the display had its footer off the bottom, even after its size was clamped)."""
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    avail = screen.availableGeometry()
+    # a window wider or taller than the screen cannot fit: it is pinned to the top-left corner
+    # instead of being pushed off the other side (that moved a 900 px window to -100 on an
+    # 800 px screen)
+    x = min(max(avail.left() + margin, widget.x()),
+            max(avail.left(), avail.right() - widget.width() - margin + 1))
+    y = min(max(avail.top() + margin, widget.y()),
+            max(avail.top(), avail.bottom() - widget.height() - margin + 1))
+    if (x, y) != (widget.x(), widget.y()):
+        widget.move(x, y)
+
+
+def clamp_to_screen(widget, margin=20):
+    """Keep a window the size it was designed for, but never bigger than the screen it is shown
+    on: a 913 px Settings card on a 1280x720 laptop left its own footer off-screen. The layout's
+    minimum has to be lowered as well, or Qt simply refuses the smaller size."""
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return False
+    avail = screen.availableGeometry()
+    w = min(widget.width(), avail.width() - margin)
+    h = min(widget.height(), avail.height() - margin)
+    if w >= widget.width() and h >= widget.height():
+        return False
+    widget.setMinimumSize(min(w, 520), min(h, 320))
+    widget.resize(w, h)
+    return True
+
+
+def esc(text):
+    """A name that is about to be shown inside a message: toasts and dialog labels are rich
+    text, so a playlist called "Bass <br> Treble" used to be reformatted instead of shown."""
+    return html_mod.escape(str(text))
+
+
 def elide(text, font, width, mode=Qt.ElideRight):
     return QFontMetrics(font).elidedText(text, mode, max(0, int(width)))
 
@@ -252,14 +293,23 @@ class TimeLabel(QWidget, Customizable):
         if text and m and any(m.groups()):
             h, mi, se = (int(g or 0) for g in m.groups())
             secs = h * 3600 + mi * 60 + se
-        else:
-            nums = [int(x) for x in re.findall(r"\d+", text)][:3]
-            if nums:
-                secs = 0
-                for n in nums:
-                    secs = secs * 60 + n
+        elif text:
+            # "1h30": with the h written out, the numbers after it are minutes and seconds
+            # without their letters — as a bare "90" the digits used to mean 1 min 30 s
+            hm = re.fullmatch(r"(\d+)\s*h\s*(\d{1,2})(?:\s*(\d{1,2}))?", text)
+            if hm:
+                h, mi, se = (int(g or 0) for g in hm.groups())
+                secs = h * 3600 + mi * 60 + se
+            else:
+                nums = [int(x) for x in re.findall(r"\d+", text)][:3]
+                if nums:
+                    secs = 0
+                    for n in nums:
+                        secs = secs * 60 + n
         if secs is not None:
-            self.jump.emit(int(secs * 1000))
+            # clamped: the signal is 32-bit, and a huge entry overflowed it into a negative
+            # seek (which libVLC ignores, so the jump silently did nothing)
+            self.jump.emit(min(int(secs * 1000), 2_000_000_000))
         self.edit.hide()
         self.update()
 
@@ -1214,8 +1264,10 @@ class VSlider(QWidget):
 # --- dropdowns and menus ------------------------------------------------------
 class MenuItem:
     def __init__(self, text="", callback=None, icon=None, shortcut="", checked=None, submenu=None,
-                 enabled=True, separator=False, icon_variant="two", data=None, color=None):
-        self.text = tr(text)
+                 enabled=True, separator=False, icon_variant="two", data=None, color=None, raw=False):
+        # `raw`: `text` is user data (a preset's name, a file's name, a device), which is shown
+        # as it is — translating it used to turn a playlist called "Bookmarks" into «Закладки».
+        self.text = text if raw else tr(text)
         self.callback = callback
         self.icon = icon
         self.shortcut = shortcut
@@ -2086,11 +2138,13 @@ class Expander(QAbstractButton):
 class InfoIcon(QLabel):
     """The small (i) next to setting labels; hover shows the explanation."""
 
-    def __init__(self, text, parent=None):
+    def __init__(self, text, parent=None, translated=False):
         super().__init__(parent)
         self.setPixmap(icons.pixmap("info", 16, c("text_3")))
         self.setFixedSize(16, 16)
-        self.setToolTip(f"<div style='max-width:320px'>{tr(text)}</div>")
+        # `translated`: the caller has translated the parts already (the settings rows do, each
+        # half on its own, so the explanation stays readable in the user's language)
+        self.setToolTip(f"<div style='max-width:320px'>{text if translated else tr(text)}</div>")
         self.setCursor(Qt.WhatsThisCursor)
 
 
@@ -2105,6 +2159,11 @@ class Label(QLabel):
 
     def setText(self, text):
         super().setText(tr(text))
+
+    def set_raw(self, text):
+        """Show user data (a file name, a tag) as it is: Label translates every string it is
+        given, so a song called "Speed" came out as «Скорость»."""
+        super().setText(text)
 
     def _apply(self):
         try:
@@ -2203,6 +2262,10 @@ class Toast(QWidget):
         self.text = QLabel()
         self.text.setFont(theme.font(14))
         self.text.setTextFormat(Qt.RichText)
+        # a notice that carries a name ("Added 3 to «a very long playlist name»") used to grow
+        # wider than the screen, and the card is centred — the beginning was cut off
+        self.text.setWordWrap(True)
+        self.text.setMaximumWidth(520)
         lay.addWidget(self.text)
         self.button = Button("", "accent", height=26)
         self.button.paintEvent = self._paint_action

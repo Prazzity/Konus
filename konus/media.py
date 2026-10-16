@@ -21,7 +21,7 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 
 from . import sysutil
-from .engine import AUDIO_EXT, SUB_EXT, VIDEO_EXT, ext, is_url, media_in_dir
+from .engine import AUDIO_EXT, SUB_EXT, VIDEO_EXT, ext, is_url, media_in_dir, natural_key
 from .store import cache_dir
 
 try:
@@ -108,11 +108,17 @@ class MediaService(QObject):
         self._lock = threading.Lock()
         self._pending = set()
         self._pix = OrderedDict()          # (path, w, h) -> QPixmap
+        self._no_thumb = set()             # files ffmpeg could not make a thumbnail of
         self._info_path = cache_dir() / "info.json"
         try:
-            self._info = json.loads(self._info_path.read_text())
+            loaded = json.loads(self._info_path.read_text())
         except (OSError, ValueError):
-            self._info = {}
+            loaded = None
+        # Only a cache that really is a table of records can be used; anything else (a truncated
+        # write that still parses, a list, a bare number) is thrown away and rebuilt — the
+        # alternative is every info() call failing on it.
+        self._info = {k: v for k, v in loaded.items() if isinstance(v, dict)} \
+            if isinstance(loaded, dict) else {}
         self._info_dirty = False
         self._save_timer = QTimer(self, singleShot=True, interval=3000, timeout=self._save_info)
         self._waves = {}
@@ -270,7 +276,7 @@ class MediaService(QObject):
             if tp.exists():
                 src = str(tp)
             else:
-                if FFMPEG and ext(path) in VIDEO_EXT:
+                if FFMPEG and ext(path) in VIDEO_EXT and path not in self._no_thumb:
                     self._queue(("thumb", path), self._make_thumb, path, str(tp))
                 return None
         img = QImage(src)
@@ -305,6 +311,10 @@ class MediaService(QObject):
             self._pending.discard(("thumb", path))
         if r and r.returncode == 0 and os.path.exists(out):
             self.thumbReady.emit(path)
+        else:
+            # remember the failure for this session: without it every repaint of the card
+            # started the same ffmpeg run over a file it can never turn into a picture
+            self._no_thumb.add(path)
 
     # --- waveform ----------------------------------------------------------------
     def waveform(self, path, bins=600):
@@ -441,7 +451,10 @@ class MediaService(QObject):
             if len(self._preview_queue) >= PREVIEW_QUEUE:
                 if not urgent:
                     return
-                self._preview_queue.pop()                    # the hovered one goes first
+                dropped = self._preview_queue.popleft()
+                # the item dropped from the full queue must lose its "queued" mark too: kept, it
+                # was never requested again (the hovered window stayed blank for the session)
+                self._preview_queued.discard((dropped[0], dropped[1]))
             self._preview_queued.add(key)
             item = (path, b0, buckets, length, self._preview_span(length, buckets))
             if urgent:
@@ -547,7 +560,9 @@ def parse_cues(path):
                     cues.append((_ts(parts[1]), _ts(parts[2])))
         return sorted(cues)
     if e == "vtt":
-        text = re.sub(r"(\n|^)(\d{2}:\d{2}\.\d{3})", r"\g<1>00:\2", text)
+        # WebVTT lets the hours go ("00:01.000"): every timestamp gets them, not just the first
+        # one of the line — the pair regex below is what reads the cue.
+        text = re.sub(r"(?<![\d:])(\d{2}:\d{2}\.\d{3})", r"00:\1", text)
     return parse_srt(text)
 
 
@@ -558,16 +573,28 @@ _LANG_TAGS = ("rus", "ru", "russian", "eng", "en", "english", "jpn", "jp", "japa
 # resolution, a codec, a year or a channel pair ("1080p", "x265", "2021", "5.1") must not be
 # mistaken for an episode — the lookarounds in the bare case are what keeps them out.
 _EP_SEASON = re.compile(r"\bs(\d{1,2})\s*[ex]\s*(\d{1,3})\b")             # s02e05, S2x05
-_EP_SHORT = re.compile(r"\b(\d{1,2})\s*x\s*(\d{1,3})\b")                  # 2x05
+# "2x05" but not the codec "05 x265": the numbers have to touch the x, and 265 cannot be an
+# episode of season 5 (it is the codec of the moment, and it used to be read as one).
+_EP_SHORT = re.compile(r"(?<![A-Za-z0-9])(\d{1,2})x(\d{1,3})(?![\dA-Za-z])")
+_EP_CODECS = {"264", "265", "266", "268", "276", "284"}                   # h264/h265/x264/x265…
 _EP_MARK = re.compile(r"\b(?:ep?|ser|series)\s*[.\-]?\s*(\d{1,3})\b")     # ep05, e05, ep.05
 _EP_BARE = re.compile(r"(?<![A-Za-z0-9.])(\d{1,3})(?![A-Za-z0-9.])")     # a lone "05"
 
 
 def name_key(path):
     """A file name as words of letters and digits, so the boundaries survive:
-    "[anti-raws]ep.01[BDRemux]" -> "anti raws ep 01 bdremux"."""
+    "[anti-raws]ep.01[BDRemux]" -> "anti raws ep 01 bdremux".
+
+    A dot between two digits is kept ("AAC 2.0" stays one token worth ignoring — see
+    episode_key — while "Show.05" becomes "show 05" like any other separator)."""
     stem = os.path.splitext(os.path.basename(path))[0].lower()
-    return " ".join("".join(ch if ch.isalnum() else " " for ch in stem).split())
+    out = []
+    for i, ch in enumerate(stem):
+        if ch == "." and 0 < i < len(stem) - 1 and stem[i - 1].isdigit() and stem[i + 1].isdigit():
+            out.append(ch)
+        else:
+            out.append(ch if ch.isalnum() else " ")
+    return " ".join("".join(out).split())
 
 
 def episode_number(key):
@@ -583,14 +610,15 @@ def episode_key(key):
     if m:
         return int(m.group(1)), int(m.group(2))
     m = _EP_SHORT.search(key)
-    if m:
+    if m and m.group(2) not in _EP_CODECS:
         return int(m.group(1)), int(m.group(2))
     m = _EP_MARK.search(key)
     if m:
         return None, int(m.group(1))
     last = None
     for m in _EP_BARE.finditer(key):
-        last = m                          # "Show 2 - 05": the episode is the last lone number
+        if m.group(1) != "0":
+            last = m                       # "Show 2 - 05": the episode is the last lone number
     return (None, int(last.group(1))) if last else (None, None)
 
 
@@ -633,20 +661,77 @@ def shared_words(video_key, audio_key):
     return words(video_key) & words(audio_key)
 
 
+def _fit_score(video_key, track_key):
+    """How well a track's name fits a video: 3 — the names are the same, 2 — the same episode
+    number and a shared title word, 1 — only the number lines up."""
+    if track_key == video_key:
+        return 3
+    if shared_words(video_key, track_key):
+        return 2
+    return 1
+
+
+def track_folders(root, depth=3, limit=500):
+    """[(folder, tracks)]: the folders under `root` that hold audio files — `root` itself first,
+    then its subfolders the way a file manager shows them, `depth` levels down at most.
+
+    A release keeps its tracks in folders of their own — "RUS Sound", and under it one folder
+    per dub — so what a matcher needs is the list of places tracks actually live, not a guess at
+    how deep they are buried. The dialog shows this list for the user to choose from, which is
+    also what tells three identically named dubs apart."""
+    if not root or not os.path.isdir(root):
+        return []
+    out = []
+    stack = [(root, 0)]
+    seen = 0
+    while stack and seen < limit:
+        folder, level = stack.pop()          # a stack: folders come out in tree order, root first
+        seen += 1
+        try:
+            entries = sorted(os.scandir(folder), key=lambda e: natural_key(e.name))
+        except OSError:
+            continue
+        n, subs = 0, []
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            try:
+                if e.is_file() and ext(e.name) in AUDIO_EXT:
+                    n += 1
+                elif e.is_dir() and level < depth:
+                    subs.append((e.path, level + 1))
+            except OSError:
+                pass
+        if n:
+            out.append((folder, n))
+        stack.extend(reversed(subs))
+    return out
+
+
+def track_candidates(video, tracks):
+    """The tracks that can pass for this video's episode — `same_episode` by name — the most
+    likely first. What a folder of three dubs offers for one episode, and what the dialog lists
+    when the matcher refused to choose between them."""
+    vkey = name_key(video)
+    pairs = [(t, name_key(t)) for t in tracks]
+    return [t for t, k in sorted((p for p in pairs if same_episode(vkey, p[1])),
+                                 key=lambda p: -_fit_score(vkey, p[1]))]
+
+
 def match_audio_tracks(videos, folders):
-    """[(video, track)]: the audio file from `folders` (and their first-level subfolders,
-    where "RUS Sound" style folders live) that belongs to each video."""
+    """[(video, track)]: the audio file from `folders` that belongs to each video.
+
+    Exactly the folders in the list are scanned — the callers hand over the ones they mean (the
+    dialog, the ones the user ticked: see track_folders)."""
     tracks = []
-    for folder in folders:
+    position = {}                            # track -> where its folder sits in the list
+    for i, folder in enumerate(folders):
         if not folder or not os.path.isdir(folder):
             continue
-        tracks += media_in_dir(folder, AUDIO_EXT)
-        try:
-            subs = [e.path for e in os.scandir(folder) if e.is_dir()]
-        except OSError:
-            subs = []
-        for sub in subs:
-            tracks += media_in_dir(sub, AUDIO_EXT)
+        for track in media_in_dir(folder, AUDIO_EXT):
+            if track not in position:
+                position[track] = i
+                tracks.append(track)
     if not tracks:
         return []
     keys = [(t, name_key(t)) for t in tracks]
@@ -656,25 +741,36 @@ def match_audio_tracks(videos, folders):
         vkey = name_key(video)
         # Score every candidate, take the best, and pair nothing when two look equally right:
         # a file's own episode number is a strong hint, but a folder can hold two series that
-        # both have an "05", and a wrong pair is worse than none.
-        best, best_score, tie = None, 0, False
+        # both have an "05", and a wrong pair is worse than none. Two equal tracks of *one*
+        # folder are such a tie; two equal tracks of different folders are the user's own list
+        # deciding (the dialog shows it, and each row names the folder its track came from).
+        best, best_score, best_folder, tie = None, 0, None, False
         for track, tkey in keys:
             if track in used or not same_episode(vkey, tkey):
                 continue
-            if tkey == vkey:
-                score = 3                     # the names are the same, bar the language tag
-            elif shared_words(vkey, tkey):
-                score = 2                     # same episode number and a shared title word
-            else:
-                score = 1                     # only the number lines up
-            if score > best_score:
-                best, best_score, tie = track, score, False
-            elif score == best_score and track != best:
-                tie = True                    # two tracks look equally right: don't choose
+            score = _fit_score(vkey, tkey)
+            folder = position[track]
+            if score > best_score or (score == best_score and best is not None and folder < best_folder):
+                best, best_score, best_folder, tie = track, score, folder, False
+            elif score == best_score and folder == best_folder:
+                tie = True
         if best is not None and not tie:
             used.add(best)
             out.append((video, best))
     return out
+
+
+def _starts_as(name, stem):
+    """Whether this file name belongs to the video rather than to another episode: after the
+    stem has to come something that is not a letter, a digit or a dotted number — "Show 1.mkv"
+    takes "Show 1.srt" and "Show 1 - Russian.srt", and leaves "Show 10.srt" and "Show 1.5.srt"
+    (the same rule name_key uses: a dot between digits belongs to the number)."""
+    if not name.startswith(stem):
+        return False
+    rest = name[len(stem):]
+    if not rest or rest[0].isalnum():
+        return False
+    return not (rest[0] == "." and len(rest) > 1 and rest[1].isdigit())
 
 
 def find_subtitles(video):
@@ -684,7 +780,7 @@ def find_subtitles(video):
     out = []
     try:
         for e in os.scandir(folder):
-            if e.is_file() and ext(e.name) in SUB_EXT and e.name.lower().startswith(stem):
+            if e.is_file() and ext(e.name) in SUB_EXT and _starts_as(e.name.lower(), stem):
                 out.append(e.path)
     except OSError:
         pass

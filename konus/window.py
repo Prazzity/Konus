@@ -32,8 +32,18 @@ from .miniplayer import MiniPlayer, PipWindow
 from .panels import PANEL_MAX_SHARE, PANEL_W, QueuePanel, SettingsPanel, TracksPanel
 from .player import OverlayWindow, PlayerArea, StatsBox
 from .theme import c
-from .widgets import OSD, Hint, MenuItem, PopupMenu, Toast, sep
+from .widgets import OSD, Hint, MenuItem, PopupMenu, Toast, clamp_position, esc, sep
 from .filedialog import FileDialog
+
+
+def _above_safe(widget, on):
+    """set_above() a moment after the change; the window may be gone by then (a language switch
+    rebuilds it), and winId() on a deleted C/C++ object raises inside a timer slot, which PyQt
+    answers by aborting the process."""
+    try:
+        sysutil.set_above(widget, on)
+    except (RuntimeError, TypeError):
+        pass
 
 FRAME = 5
 
@@ -142,7 +152,9 @@ class MainWindow(QWidget):
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         QApplication.instance().installEventFilter(self)     # see eventFilter: the edge cursor
-        self.setMinimumSize(560, 360)
+        # the control bar needs 780 px of its own (seek + transport + volume): a narrower
+        # window squeezed its elements on top of each other
+        self.setMinimumSize(800, 420)
         self.mode = "player"
         self.hide_ui = False
         self.pip = None
@@ -161,6 +173,7 @@ class MainWindow(QWidget):
         self._scrub_applied = None     # fraction the live scrub already seeked to
         self._geo_anim = None          # running maximize/restore animation
         self._normal_geo = None        # size to come back to (see _maximize_animated)
+        self._fullscreen_from = QRect()  # the size the window went into fullscreen with
         self._was_max = False
         self._cursor_hidden = False
         self._last_move = 0
@@ -410,13 +423,10 @@ class MainWindow(QWidget):
     def _update_title(self):
         e = self.engine
         show = self.store.get("title_filename")
-        text = e.file_title() if (e.current and show) else "VLC Media Player"
+        text = e.file_title() if (e.current and show) else APP_NAME
         for w in self._elements("title"):
             w.set_text(text)
         self.setWindowTitle(text if e.current else APP_NAME)
-        if self.mode == "library" and not e.current:
-            for w in self._elements("title"):
-                w.set_text("VLC Media Player")
 
     def _update_seek_modes(self):
         e = self.engine
@@ -493,7 +503,6 @@ class MainWindow(QWidget):
             self.raise_()
         if self.store.get("osd_filename") and not is_audio(cur):
             QTimer.singleShot(400, self._show_filename)
-        self._track_popup()
         QTimer.singleShot(1500, self._load_chapters)
         self._resize_to_video_pending = True
 
@@ -527,6 +536,10 @@ class MainWindow(QWidget):
         text = tr(text)
         if self.store.get("osd_feedback") and self.mode == "player" and self.isVisible():
             self.osd.show_text(text, key or getattr(self, "_last_key", ""), self.store.get("osd_duration"))
+        elif self.isVisible():
+            # the OSD belongs to the video surface: with the library on screen (or the OSD off)
+            # a message — "Nothing playable there" for a file that is gone — was lost entirely
+            self.toast.show_message(esc(text))
         self._last_key = ""
 
     def _on_resumed(self, ms, mode):
@@ -561,6 +574,21 @@ class MainWindow(QWidget):
         pass
 
     def _on_setting(self, key, value):
+        if key == "language":
+            # Any path that changes the stored language rebuilds the interface: the Settings
+            # dialog's own dropdown does it itself (see the reopen path below), so while that
+            # dialog is on screen this only happens for the other paths — Reset All, a profile
+            # switch. One rebuild, deferred: the widget that sent the change is still closing.
+            want = i18n.code_for(value or "")
+            if want == "system":
+                want = i18n.detect_system()
+            if want == i18n.language():
+                return
+            from .settings import SettingsDialog
+            if any(isinstance(w, SettingsDialog) and w.isVisible() for w in QApplication.topLevelWidgets()):
+                return
+            QTimer.singleShot(0, self.apply_language)
+            return
         if key in ("theme", "accent"):
             self.apply_theme()
         elif key in ("title_filename",):
@@ -632,12 +660,14 @@ class MainWindow(QWidget):
         if not show:
             return
         self.mini.refresh()
-        self.mini.adjustSize()
         par = self.library_page.rect()
+        self.mini.fit_height(par.height())
         corner = self.store["mini_corner"]
         w, h = self.mini.width(), self.mini.height()
-        x = 0 if "l" in corner else par.width() - w
-        y = 0 if "t" in corner else par.height() - h
+        # clamped into the page: a corner the card does not fit in (a small window with the
+        # queue open) used to push it out of the window altogether
+        x = max(0, 0 if "l" in corner else par.width() - w)
+        y = max(0, 0 if "t" in corner else par.height() - h)
         self.mini.move(x, y)
         self.mini.raise_()
 
@@ -721,7 +751,8 @@ class MainWindow(QWidget):
         overlay = self.overlay_mode()
         decorations = self.store.get("decorations")
         in_library = self.mode == "library"
-        self.titlebar.setVisible(not self.isFullScreen() and (in_library or (not overlay and decorations)))
+        # in a fullscreen library the title bar stays: it is the visible way back out of it
+        self.titlebar.setVisible(in_library or (not self.isFullScreen() and not overlay and decorations))
         self.player.bar.setVisible(not overlay and not in_library)
         if self.isFullScreen():
             self.player.set_inset(0)
@@ -731,7 +762,10 @@ class MainWindow(QWidget):
             self.player.set_inset(10, top=1)
         if overlay and not in_library:
             self._overlay_timer.start()
-            if self.store.get("autohide") == "Never" and self.isFullScreen():
+            if self.isFullScreen() and (self.store.get("autohide") == "Never"
+                                        or not self._player_has_picture()):
+                # nothing is playing: show the bars rather than leave a black screen with no hint
+                # of what to do. The pointer moving away hides them as usual.
                 self._show_overlays()
         else:
             self._overlay_timer.stop()
@@ -831,6 +865,10 @@ class MainWindow(QWidget):
             self._cursor_timer.start()
 
     def _hide_cursor(self):
+        # A menu or a dialog on screen needs the pointer: hiding it there left the user without a
+        # cursor over the menu and nothing brought it back (only the video surface does that).
+        if QApplication.activePopupWidget() is not None or QApplication.activeModalWidget() is not None:
+            return
         if self.isFullScreen() and not any(o.isVisible() for o in self._fs_bars.values()) and self.open_panel is None:
             QApplication.setOverrideCursor(Qt.BlankCursor)
             self._cursor_hidden = True
@@ -847,12 +885,25 @@ class MainWindow(QWidget):
         else:
             self.enter_fullscreen()
 
+    def _player_has_picture(self):
+        """Whether the player has something to fill the screen with. An idle player is a plain
+        black page (see BlankView), and in fullscreen its bars keep out of the way: switching to
+        it with nothing to play left the whole screen black."""
+        e = self.engine
+        return bool(e.current) and e.state not in ("stopped", "ended", "error") and e.is_active()
+
     def enter_fullscreen(self):
         if self.pip is not None:
             self.toggle_pip()
-        if self.mode != "player":
+        # Fullscreen fills the screen with what is on it. Going to the player when there is
+        # nothing to play showed a black page instead, so the library comes along — it is the
+        # screen the user was looking at, and one can browse and start something from there.
+        if self.mode != "player" and self._player_has_picture():
             self.show_player()
         self._was_max = self.isMaximized()
+        # the size to come back to when the window is dragged out of fullscreen (see
+        # _leave_fullscreen_for_drag): Qt's own idea of "normal" is the fullscreen rectangle here
+        self._fullscreen_from = QRect(self.geometry())
         target = self.store.get("fullscreen_screen")
         if target != "Current screen":
             for sc in QApplication.screens():
@@ -1083,7 +1134,10 @@ class MainWindow(QWidget):
     def seek_hover(self, frac, gpos, bar):
         e = self.engine
         length = e.time()[1]
-        if not e.current or length <= 0:
+        if not e.current or length <= 0 or not e.is_active():
+            # nothing to show for the moment under the pointer: the card of the previous file
+            # used to stay on screen after a Stop
+            self.seek_hover_end()
             return
         ms = int(frac * length)
         pm = None
@@ -1096,8 +1150,14 @@ class MainWindow(QWidget):
                 self._prefilled = e.current
                 self.media.prefill_previews(e.current, length)
         top = bar.mapToGlobal(QPoint(0, 0)).y()
-        self._preview_args = (gpos.x(), top, fmt_time(ms))
-        self.preview.show_at(gpos.x(), top, fmt_time(ms), pm)
+        # the card is drawn over the bar it belongs to; a bar at the top of the screen (a seek
+        # dragged into the title bar) has no room there, so it flips below the bar instead
+        screen = QApplication.primaryScreen()
+        below = bool(screen is not None and top - screen.availableGeometry().top() < 200)
+        if below:
+            top = bar.mapToGlobal(QPoint(0, bar.height())).y()
+        self._preview_args = (gpos.x(), top, fmt_time(ms), below)
+        self.preview.show_at(gpos.x(), top, fmt_time(ms), pm, below)
 
     def _preview_ready(self, path, bucket):
         """A preview frame was written: show it if the pointer is still on this file."""
@@ -1106,8 +1166,8 @@ class MainWindow(QWidget):
         length = self._preview_length
         pm = self.media.preview(path, self._preview_ms, length) if length else None
         if pm is not None:
-            x, top, text = self._preview_args
-            self.preview.show_at(x, top, text, pm)
+            x, top, text, below = self._preview_args
+            self.preview.show_at(x, top, text, pm, below)
 
     def seek_hover_end(self):
         self.preview.hide()
@@ -1451,11 +1511,41 @@ class MainWindow(QWidget):
         self.close()
 
     def start_move(self):
-        if not self.windowHandle() or self.isFullScreen():
+        if not self.windowHandle():
             return
-        if self.isMaximized():
+        if self.isFullScreen():
+            # Dragging the bar at the top of a fullscreen window brings the window back, with the
+            # pointer where it is on that bar, and the drag carries on as a move — the same
+            # gesture that restores a maximized window (see _restore_for_drag). Before this the
+            # drag simply did nothing.
+            self._leave_fullscreen_for_drag()
+        elif self.isMaximized():
             self._restore_for_drag()
         wm.start(self, snap=True)          # a drag to the top edge maximizes (see wm.snap_to_top)
+
+    def _leave_fullscreen_for_drag(self):
+        """Come out of fullscreen for a drag: the window takes the size it had before (or the
+        screen's usable area when there is none), placed so the pointer stays on the bar."""
+        cursor = QCursor.pos()
+        screen = self.screen() or QApplication.primaryScreen()
+        # the size the window had when it went fullscreen: Qt's own "normal" geometry inside
+        # fullscreen is the fullscreen rectangle, and the stored one may be from an older session
+        target = QRect(self._fullscreen_from)
+        if target.isEmpty() or target.width() < 480 or target.height() < 320:
+            target = QRect(self._normal_target())
+        if target.isEmpty() or target.width() < 480 or target.height() < 320:
+            target = QRect(screen.availableGeometry()) if screen else QRect(self.geometry())
+        self._show_cursor()
+        self.exit_fullscreen()
+        g = QRect(target)
+        g.moveLeft(int(cursor.x() - min(target.width() // 2, 220)))
+        g.moveTop(max(0, int(cursor.y() - min(22, g.height() // 12))))
+        self.setUpdatesEnabled(False)
+        self.setGeometry(g)
+        self.setUpdatesEnabled(True)
+        clamp_position(self)                 # a drag can start at the very edge of the screen
+        self._normal_geo = QRect(self.geometry())
+        self._sync_all()
 
     def _restore_for_drag(self):
         """Bring a maximized window back to its normal size when its title bar is dragged.
@@ -1753,7 +1843,7 @@ class MainWindow(QWidget):
             self.engine.start_external_audio()
         else:
             self.engine.add_audio_file(f)          # streams: the only way libVLC offers
-        self.auto_match_audio(path or self.engine.current)
+        self.auto_match_audio(path or self.engine.current, f)
 
     def new_playlist(self, items=None):
         d = PlaylistDialog(self, items=items)
@@ -1777,7 +1867,7 @@ class MainWindow(QWidget):
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write("\n".join(lines) + "\n")
-                self.notify(tr("Exported {name}").format(name=os.path.basename(path)))
+                self.notify(tr("Exported {name}").format(name=esc(os.path.basename(path))))
             except OSError:
                 self.error("Couldn't write the playlist file")
 
@@ -1785,8 +1875,8 @@ class MainWindow(QWidget):
         out = [MenuItem("New Playlist…", lambda: self.new_playlist(items), icon="add", icon_variant="")]
         for pl in self.store.playlists():
             out.append(MenuItem(pl["name"], lambda pid=pl["id"]: (self.store.add_to_playlist(pid, items),
-                                                                  self.notify(tr("Added to {name}").format(name=self.store.playlist(pid)['name']))),
-                                icon="playlist"))
+                                                                  self.notify(tr("Added to {name}").format(name=esc(self.store.playlist(pid)['name'])))),
+                                icon="playlist", raw=True))
         return out
 
     def show_properties(self, item=None):
@@ -1796,8 +1886,8 @@ class MainWindow(QWidget):
 
     def folder_info(self, target):
         if isinstance(target, tuple):
-            self.notify(tr("{name}: {n} items").format(
-                name=self.library.model.title(target), n=self.library.count(self.library.entries())))
+            self.notify(f"{self.library.model.title(target)}: "
+                        + trn("item", "items", self.library.count(self.library.entries())))
             return
         media = self.media
 
@@ -1863,6 +1953,7 @@ class MainWindow(QWidget):
 
     # ------------------------------------------------------------------ menus
     def open_main_menu(self, anchor):
+        self._show_cursor()
         k = self.key_label
         recent = self.store["recent_open"]
         profiles = self.store.profiles()
@@ -1874,7 +1965,7 @@ class MainWindow(QWidget):
             MenuItem("Open Capture Device", self.open_capture, icon="capture-device", shortcut=k("open_capture")),
             MenuItem("Convert", self.open_convert, icon="swap", shortcut=k("convert")),
             MenuItem("Open Recent", icon="recent", enabled=bool(recent),
-                     submenu=lambda: [MenuItem(display_name(r), lambda r=r: self.play([r])) for r in recent] +
+                     submenu=lambda: [MenuItem(display_name(r), lambda r=r: self.play([r]), raw=True) for r in recent] +
                      [sep(), MenuItem("Clear", lambda: self.store.__setitem__("recent_open", []))]),
             sep(),
             # the profile name is a key ("Movies") shown to the user as «Фильмы» in the
@@ -1892,39 +1983,52 @@ class MainWindow(QWidget):
     def _rename_profile(self, name):
         new, ok = QInputDialog.getText(self, tr("Rename Profile"), tr("Name:"), text=name)
         if ok and self.store.rename_profile(name, new):
-            self.notify(tr("Profile: {name}").format(name=new.strip()))
+            self.notify(tr("Profile: {name}").format(name=esc(new.strip())))
+
+    def _profile_label(self, name):
+        """A profile's name as it is shown: the built-in ones ("Movies") are stored in English
+        and appear translated, while a name the user typed is user data and stays as it is."""
+        from .store import DEFAULT_PROFILES
+        return tr(name) if name in DEFAULT_PROFILES else name
 
     def _profile_menu(self):
-        # the built-in profile names are stored in English and shown translated
-        items = [MenuItem(tr(p), lambda p=p: self._switch_profile(p), checked=(p == self.store.profile))
-                 for p in self.store.profiles()]
+        items = [MenuItem(self._profile_label(p), lambda p=p: self._switch_profile(p),
+                          checked=(p == self.store.profile), raw=True) for p in self.store.profiles()]
         items.append(MenuItem("New", self._new_profile, icon="add", icon_variant=""))
         items.append(MenuItem("Rename…", lambda: self._rename_profile(self.store.profile),
                               enabled=bool(self.store.profile)))
         if len(self.store.profiles()) > 1:
-            items.append(MenuItem(tr("Delete “{name}”").format(name=tr(self.store.profile)),
-                                  lambda: self.store.remove_profile(self.store.profile)))
+            items.append(MenuItem(tr("Delete “{name}”").format(name=self._profile_label(self.store.profile)),
+                                  self._delete_profile))
         return items
+
+    def _delete_profile(self):
+        name = self.store.profile
+        if self.confirm(tr("Delete the profile “{name}” and everything it keeps?").format(
+                name=self._profile_label(name))):
+            self.store.remove_profile(name)
 
     def _switch_profile(self, name):
         self.store.switch_profile(name)
         self.apply_theme()
         self.apply_shortcuts()
-        self.notify(tr("Profile: {name}").format(name=name))
+        self.notify(tr("Profile: {name}").format(name=esc(name)))
 
     def _new_profile(self):
         name, ok = QInputDialog.getText(self, tr("New Profile"),
                                         tr("Name (starts as a copy of the current profile):"))
         if ok and name.strip():
             if self.store.add_profile(name.strip()):
-                self.notify(tr("Profile: {name}").format(name=name.strip()))
+                self.notify(tr("Profile: {name}").format(name=esc(name.strip())))
 
     def open_context_menu(self, gpos, extra=None):
+        self._show_cursor()            # the pointer comes back with the menu (see _hide_cursor)
         e = self.engine
         k = self.key_label
         active = e.is_active()
         items = [
-            MenuItem("Pause" if e.is_playing() else "Play", e.toggle, icon="playback", shortcut=k("play_pause")),
+            MenuItem("Pause" if e.is_playing() else "Play", e.toggle,
+                     icon="pause" if e.is_playing() else "play", shortcut=k("play_pause")),
             MenuItem("Stop", e.stop, icon="stop", shortcut=k("stop"), enabled=active),
             MenuItem("Previous Item", e.prev, icon="previous", shortcut=k("prev")),
             MenuItem("Next Item", e.next, icon="next", shortcut=k("next")),
@@ -1991,9 +2095,9 @@ class MainWindow(QWidget):
                                                                "1.5 hours", "2 hours", "End of current item")]),
             MenuItem("Stop After Each Item", e.toggle_stop_after, checked=e.stop_after),
             MenuItem("Chapter", enabled=bool(getattr(self, "_chapters", [])),
-                     submenu=lambda: [MenuItem(n, lambda i=i: e.set_chapter(i)) for i, n, _ in self._chapters]),
+                     submenu=lambda: [MenuItem(n, lambda i=i: e.set_chapter(i), raw=True) for i, n, _ in self._chapters]),
             MenuItem("Bookmarks", enabled=bool(e.current and self.store.bookmarks(e.current)),
-                     submenu=lambda: [MenuItem(b["name"] or fmt_time(b["ms"]), lambda b=b: e.seek_to(b["ms"]),
+                     submenu=lambda: [MenuItem(b["name"] or fmt_time(b["ms"]), lambda b=b: e.seek_to(b["ms"]), raw=True,
                                                shortcut=fmt_time(b["ms"])) for b in self.store.bookmarks(e.current)]),
         ]
 
@@ -2011,7 +2115,7 @@ class MainWindow(QWidget):
         e = self.engine
         k = self.key_label
         return [
-            MenuItem("Video Track", submenu=lambda: [MenuItem(n, lambda i=i: e.set_video_track(i), checked=e.video_track() == i)
+            MenuItem("Video Track", submenu=lambda: [MenuItem(n, lambda i=i: e.set_video_track(i), checked=e.video_track() == i, raw=True)
                                                      for i, n in e.video_tracks()] or [MenuItem("None", enabled=False)]),
             MenuItem("Fullscreen", self.toggle_fullscreen, shortcut=k("fullscreen"), checked=self.isFullScreen()),
             MenuItem("Picture in Picture", self.toggle_pip, shortcut=k("mini"), checked=self.pip is not None),
@@ -2045,7 +2149,7 @@ class MainWindow(QWidget):
             MenuItem("Audio Track", submenu=self._audio_tracks_menu),
             MenuItem("Audio Device", submenu=lambda: [MenuItem("System default", lambda: e.set_audio_device(None),
                                                                checked=e.audio_device() == "")] +
-                     [MenuItem(desc, lambda d=d: e.set_audio_device(d), checked=e.audio_device() == d)
+                     [MenuItem(desc, lambda d=d: e.set_audio_device(d), checked=e.audio_device() == d, raw=True)
                       for d, desc in e.audio_devices()]),
             MenuItem("Stereo Mode", submenu=lambda: [
                 MenuItem(tr(STEREO_LABELS.get(m, m)), lambda m=m: e.set_fx("stereo_mode", m),
@@ -2057,9 +2161,12 @@ class MainWindow(QWidget):
             MenuItem("Volume Down", self.volume_down, shortcut=k("vol_down")),
             MenuItem("Mute", e.toggle_mute, shortcut=k("mute"), checked=e.muted),
             sep(),
-            MenuItem("Add Audio Track…", lambda: self.add_audio_tracks(e.current), enabled=bool(e.current)),
+            # a stream has no file to give a track to: the second player takes local items
+            # only, so offering it there ended in "Couldn't load that audio file" every time
+            MenuItem("Add Audio Track…", lambda: self.add_audio_tracks(e.current),
+                     enabled=bool(e.current) and not is_url(e.current or "")),
             MenuItem("Match Tracks to the Folder…", lambda: self.match_audio_tracks(e.current),
-                     enabled=bool(e.current)),
+                     enabled=bool(e.current) and not is_url(e.current or "")),
             MenuItem("Audio Settings…", lambda: self.toggle_panel("settings", "audio", force=True)),
         ]
 
@@ -2067,7 +2174,7 @@ class MainWindow(QWidget):
         """The file's own tracks plus the ones added from external files, with a way to
         forget the added ones — they come back with the file on every play."""
         e = self.engine
-        items = [MenuItem(n, lambda i=i: e.set_audio_track(i), checked=e.audio_track() == i)
+        items = [MenuItem(n, lambda i=i: e.set_audio_track(i), checked=e.audio_track() == i, raw=True)
                  for i, n in e.audio_tracks()] or [MenuItem("None", enabled=False)]
         files = self.store.external_audio(e.current) if e.current and not is_url(e.current) else []
         if files:
@@ -2085,19 +2192,24 @@ class MainWindow(QWidget):
             return
         AudioTracksDialog(self, path).exec_()
 
-    def auto_match_audio(self, video):
+    def auto_match_audio(self, video, track=None):
         """After one track is added, give the other episodes of that folder theirs too:
-        the scan runs in the background, the pairs land in the settings."""
+        the scan runs in the background, the pairs land in the settings.
+
+        The tracks come from the folder the added one lives in — in a release with several dubs
+        (RUS Sound/<team>) that folder is the user's choice of dub, and it is the only folder
+        where this series' episodes have tracks to find."""
         if not video or is_url(video):
             return
         folder = os.path.dirname(video)
         if not folder or not os.path.isdir(folder):
             return
+        source = os.path.dirname(track) if track and not is_url(track) else folder
         want = [v for v in media_in_dir(folder, VIDEO_EXT)
                 if v != video and not self.store.external_audio(v)]
         if not want:
             return
-        tasks.run_bg(match_audio_tracks, want, [folder],
+        tasks.run_bg(match_audio_tracks, want, [source],
                      on_done=lambda pairs: self._matched_audio(pairs, len(want)))
 
     def _matched_audio(self, pairs, looked):
@@ -2135,7 +2247,7 @@ class MainWindow(QWidget):
             MenuItem("Add Subtitles to Folder / Playlist…", lambda: self.open_add_subtitles(
                 os.path.dirname(e.current) if e.current and not is_url(e.current) else None, "folder"),
                      enabled=bool(e.current) and not is_url(e.current or "")),
-            MenuItem("Sub Track", submenu=lambda: [MenuItem(n, lambda i=i: e.set_spu(i), checked=e.spu() == i)
+            MenuItem("Sub Track", submenu=lambda: [MenuItem(n, lambda i=i: e.set_spu(i), checked=e.spu() == i, raw=True)
                                                    for i, n in e.spu_tracks()] or [MenuItem("None", enabled=False)]),
             sep(),
             MenuItem("Delay −100 ms", lambda: self.sub_delay(-0.1), shortcut=k("sub_delay_down")),
@@ -2189,6 +2301,8 @@ class MainWindow(QWidget):
         return False
 
     def _run_action(self, aid, key=""):
+        if aid not in ACTION:
+            return                      # a shortcut stored by another build: nothing to run
         focus = QApplication.focusWidget()
         if focus is not None and focus is not self and self._typing(focus)                 and key in ("Up", "Down", "Left", "Right", "Space"):
             return                       # the field needs these itself
@@ -2211,7 +2325,10 @@ class MainWindow(QWidget):
             self.engine.message.emit("Pause" if self.engine.is_playing() else "Play", "") if False else None
 
     def _apply_global_hotkeys(self):
-        mapping = {aid: k for aid, k in self.store["global_hotkeys"].items() if k}
+        # Only actions this build knows: a config from another version used to register its id
+        # with the system, and pressing that key then raised KeyError inside a Qt slot — which
+        # PyQt answers by aborting the process.
+        mapping = {aid: k for aid, k in self.store["global_hotkeys"].items() if k and aid in ACTION}
         if not mapping:
             if getattr(self, "_global", None):
                 self._global.stop()
@@ -2261,7 +2378,7 @@ class MainWindow(QWidget):
             self.tray.setVisible(bool(s.get("tray_icon")))
 
     def set_above(self, widget, on):
-        QTimer.singleShot(200, lambda: sysutil.set_above(widget, on))
+        QTimer.singleShot(200, lambda: _above_safe(widget, on))
 
     def _update_icon(self, state):
         base = icons.app_pixmap(64).copy()
@@ -2316,19 +2433,6 @@ class MainWindow(QWidget):
             self._unminimize()
             self.raise_()
             self.activateWindow()
-
-    def _track_popup(self):
-        mode = self.store.get("track_popup")
-        hidden = self.isMinimized() or not self.isVisible() or not self.isActiveWindow()
-        if mode == "Never" or (mode == "When minimized" and not hidden):
-            return
-        title = self.engine.title()
-        artist = self.engine.artist()
-        dur = int(self.store.get("popup_duration") * 1000)
-        if dur <= 0:
-            return
-        if self.tray is not None and self.tray.isVisible():
-            self.tray.showMessage(title, artist or "Now playing", QIcon(icons.app_pixmap(64)), dur)
 
     # ------------------------------------------------------------------ drag & drop
     def dragEnterEvent(self, e):

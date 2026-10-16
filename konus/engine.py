@@ -119,6 +119,9 @@ SETTING_TO_FX = {
     "visualizer": "visualizer", "default_speed": "speed",
 }
 
+# The other way round, for the panels: they edit the running player by fx name
+FX_SETTING = {fx: key for key, fx in SETTING_TO_FX.items()}
+
 # Effects that only exist as libVLC instance options.
 INSTANCE_FX = {
     "flip", "rotate", "sharpen", "banding", "grain", "extract", "extract_color", "thres", "thres_color",
@@ -720,6 +723,8 @@ class Engine(QObject):
         self._ext_own_track = None           # the file's own track it replaced
         self._mp_new = False                 # a media has just been built (see _poll)
         self._item_played = False            # the current item really produced sound/picture
+        self.finished_all = False            # the queue ran out (the window acts on it)
+        self._quiet_start = False            # this item was started by the engine itself
         self._plainReady.connect(self._plain_ready)
         self._sleep_timer = QTimer(self, singleShot=True, timeout=self._sleep_fire)
         self._sleep_end_of_item = False
@@ -1106,6 +1111,11 @@ class Engine(QObject):
             return False
         if names:
             self.names.update(names)
+        # A recording belongs to the item that is playing now: finished here, before the
+        # position it is cut at is thrown away (it used to be cut against the new item's length
+        # or dropped as "too short")
+        if self._record:
+            self.stop_record()
         # Save the old item's position *before* the queue changes, then forget it:
         # play_index() would otherwise file it under the new queue's item.
         self._save_progress()
@@ -1153,6 +1163,7 @@ class Engine(QObject):
                 self.play_index(self.index)
             else:
                 self.index = -1
+                self.stop_external_audio()
                 self.mediaChanged.emit()
         self.playlistChanged.emit()
 
@@ -1185,8 +1196,15 @@ class Engine(QObject):
 
     def clear(self):
         self._save_progress()
+        self.stop_record()                 # nothing is playing: the take ends with the position
+        self._ext_stop_if_idle()           # and so does the added audio track
         self.mp.stop()
         self.items, self.index = [], -1
+        # the position of the item that just went away is not the position of anything: left
+        # behind, the time label kept the old 00:02:31 and the seek bar stayed filled
+        self._pending_seek = None
+        self._last = (0, self._last[1])
+        self.tick.emit(*self._last)
         self.playlistChanged.emit()
         self.mediaChanged.emit()
 
@@ -1204,6 +1222,11 @@ class Engine(QObject):
         """`ext=False` keeps the remembered external audio track off: a rebuild calls this for
         the item that is already playing, and starting it there put the external file back over
         the built-in track the user had just picked."""
+        if getattr(self, "_record", None) and self._record.get("item") != self.items[i]:
+            # a recording belongs to the item it was started on: finished here, while the
+            # position of that item is still known, and not against the next file's length
+            self.stop_record()
+        self._quiet_start = bool(quiet)
         self._plain_es, self._plain_on, self._plain_busy = {}, None, set()
         if not quiet:
             self._plain_want = self._hold = None
@@ -1335,6 +1358,9 @@ class Engine(QObject):
 
     def stop(self):
         self.stop_external_audio()
+        # ...and the recording, for the same reason as in load(): stop_record() reads the
+        # position, which is zeroed a few lines below
+        self.stop_record()
         self._save_progress()
         self.mp.stop()
         # A stopped player shows 00:00 and has no seek in flight: leaving the old position or
@@ -1343,7 +1369,6 @@ class Engine(QObject):
         self._pending_seek = None
         self._last = (0, self._last[1])
         self.tick.emit(*self._last)
-        self.stop_record()
 
     def next(self, auto=False):
         if not self.items:
@@ -1747,6 +1772,15 @@ class Engine(QObject):
             return False
         return state in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error)
 
+    def _ext_stop_if_idle(self):
+        """Nothing is playing any more: the added audio track stops too.
+
+        The two players are kept in step by the poll, which only runs while the state is
+        playing/paused — an item that ended on its own, a queue that was cleared or emptied left
+        the second player running with the file's own track still switched off."""
+        if self.external_audio_on():
+            self.stop_external_audio()
+
     def stop_external_audio(self, restore=True):
         if self._ext_mp is not None:
             try:
@@ -1812,7 +1846,9 @@ class Engine(QObject):
             name = os.path.basename(self._ext_file or "")
             diag.log("ext_audio", event="ran-out", file=name)
             self.stop_external_audio()
-            self.message.emit(tr("The added audio track ended — back to the file's own sound"), name)
+            # the second argument is the *key* that caused a message ("" when none): a file
+            # name there came out as the OSD's "Pressed <name>" line
+            self.message.emit(tr("The added audio track ended — back to the file's own sound"), "")
             return
         if bool(mp.is_playing()) == want_pause:          # it should run, or it should pause
             mp.set_pause(1 if want_pause else 0)
@@ -2292,9 +2328,17 @@ class Engine(QObject):
         self._record = None
         self.recordingChanged.emit(False)
         if rec["proc"]:
-            rec["proc"].write(b"q")
-            rec["proc"].terminate()
-            self.message.emit(tr("Recording saved: {name}").format(name=os.path.basename(rec['out'])), "")
+            proc, out = rec["proc"], rec["out"]
+            # ffmpeg may have died long ago (a stream it cannot open): nothing was written, and
+            # the player used to announce the saved file all the same
+            dead = proc.state() == QProcess.NotRunning
+            proc.write(b"q")
+            proc.terminate()
+            written = bool(out) and os.path.exists(out) and os.path.getsize(out) > 0
+            if dead and not written:
+                self.message.emit(tr("Couldn't save the recording"), "")
+            else:
+                self.message.emit(tr("Recording saved: {name}").format(name=os.path.basename(out or "")), "")
             return
         item = rec["item"]
         start, end = rec["start"], self._last[0] if self.current == item else self._last[1]
@@ -2343,6 +2387,10 @@ class Engine(QObject):
             if state == "ended":
                 self._pending_seek = None        # nothing will arrive: the item is over
                 self._on_ended()
+                if getattr(self, "finished_all", False):
+                    # the window acts on "the queue is over" as it hears the state change, and
+                    # the flag only exists now: announced once more, with it set
+                    self.stateChanged.emit("ended")
                 return
             if state == "error":
                 msg = tr("Couldn't play “{name}”").format(name=self.title())
@@ -2466,17 +2514,20 @@ class Engine(QObject):
             self._sleep_end_of_item = False
             self.fx["sleep"] = "Off"
             self.sleepChanged.emit("Off")
+            self._ext_stop_if_idle()
             self.mediaChanged.emit()
             return
         if self.repeat == "one":
             self.play_index(self.index, resume=False)
             return
         if self.stop_after:
+            self._ext_stop_if_idle()
             self.mediaChanged.emit()
             return
         last = self.index + 1 >= len(self.items) and self.repeat != "all" and not (self.shuffle and len(self.items) > 1)
         if last:
             self.finished_all = True
+            self._ext_stop_if_idle()       # the queue is over: the added track stops with it
             self.mediaChanged.emit()
             return
         self.next(auto=True)
@@ -2505,7 +2556,10 @@ class Engine(QObject):
             title = ""
         entry = self.meta.setdefault(item, {})
         entry.update({"title": title, "artist": artist, "album": album, "art": art})
-        if artist:
+        if artist and not getattr(self, "_quiet_start", False):
+            # a quiet start is the engine rebuilding itself (an instance setting changed, a
+            # profile switch): the file is not played again, and "Frequently listened" counted
+            # these as plays
             self.store.count_artist(artist)
         self.metaChanged.emit()
 

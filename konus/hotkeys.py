@@ -18,9 +18,13 @@ KEYNAMES = {
     "space": 0x20, "esc": 0x1B, "left": 0x25, "right": 0x27, "up": 0x26, "down": 0x28,
     "pgup": 0x21, "pgdown": 0x22, "pageup": 0x21, "pagedown": 0x22, "del": 0x2E, "ins": 0x2D,
     "return": 0x0D, "enter": 0x0D, "home": 0x24, "end": 0x23, "tab": 0x09,
+    "backspace": 0x08, "pause": 0x13, "print": 0x2C, "plus": 0x6B,
     "media play": 0xB3, "media next": 0xB0, "media previous": 0xB1, "media stop": 0xB2,
     "volume up": 0xAF, "volume down": 0xAE, "volume mute": 0xAD,
 }
+# F1–F12, which the shortcuts dialog offers and the most common thing to bind globally: they used
+# to parse to nothing, so the key was accepted, stored, and never registered.
+KEYNAMES.update({f"f{i}": 0x6F + i for i in range(1, 13)})
 MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -45,6 +49,8 @@ class GlobalHotkeys(QObject):
             _user32.PostThreadMessageW(self._thread.ident, WM_QUIT, 0, 0)
 
     def _parse(self, seq):
+        if str(seq).strip() == "+":
+            return (KEYNAMES["plus"], 0)      # the numpad plus alone (Ctrl++ comes out of the
         parts = [p.strip() for p in str(seq).replace("++", "+plus").split("+") if p.strip()]
         mods = 0
         key = None
@@ -60,9 +66,15 @@ class GlobalHotkeys(QObject):
         if name in KEYNAMES:
             vk = KEYNAMES[name]
         elif len(key) == 1:
-            vk = self._letter_vk(key)
-            if vk is None:
+            found = self._letter_vk(key)
+            if found is None:
                 return None
+            vk, needs_shift = found
+            # "%" is Shift+5 and has to be registered as such (the bare "5" was swallowed
+            # system-wide instead), but a letter's shift bit only means "this is the uppercase
+            # form": QKeySequence writes "L" for the letter, so Shift must not be added there
+            if needs_shift and not key.isalnum():
+                mods |= 0x0004                       # MOD_SHIFT
         else:
             return None
         return (vk, mods)
@@ -81,7 +93,7 @@ class GlobalHotkeys(QObject):
             except AttributeError:
                 continue
             if r != -1:
-                return r & 0xFF
+                return r & 0xFF, bool((r >> 8) & 1)      # (virtual key, needs shift)
         return None
 
     def _run(self):

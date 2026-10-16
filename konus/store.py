@@ -7,6 +7,7 @@ so switching profile swaps the whole configuration including the control layout.
 import copy
 import fnmatch
 import json
+import math
 import os
 import re
 import time
@@ -150,7 +151,9 @@ class Store(QObject):
         self._foreign = False             # the file belongs to a newer player: do not write it
         self._save_retry = 0
         try:
-            with open(self.path, encoding="utf-8") as f:
+            # utf-8-sig: a BOM (Notepad, PowerShell's Set-Content -Encoding UTF8) made json.load
+            # fail, which read as "no config" — the defaults were then written over the file
+            with open(self.path, encoding="utf-8-sig") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 version = saved.get("version")
@@ -190,14 +193,8 @@ class Store(QObject):
         deep in the UI — 14 of 33 damaged-config cases ended in a crash. Anything that does not
         match falls back to the default for that key."""
         default = STATE_DEFAULTS[key]
-        if isinstance(default, bool):
-            return value if isinstance(value, bool) else default
-        if isinstance(default, int):
-            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else default
-        if isinstance(default, float):
-            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else default
-        if isinstance(default, str):
-            return value if isinstance(value, str) else default
+        if isinstance(default, (bool, int, float, str)):
+            return Store._coerce_value(default, value)
         if isinstance(default, list):
             if not isinstance(value, list):
                 return default
@@ -209,20 +206,125 @@ class Store(QObject):
         return value
 
     @staticmethod
+    def _number(value):
+        """A stored number, or None when it is not one: a bool is not a number, and neither is
+        the inf/nan JSON hands over for "1e400" — int() on those is what killed the start."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
+
+    @staticmethod
+    def _coerce_value(default, value):
+        """`value` when it has the shape of `default`, else `default`. Lists are matched
+        element-wise (and taken to the default's length — an equalizer with five bands is not a
+        thing the panel can draw)."""
+        if isinstance(default, bool):
+            return value if isinstance(value, bool) else default
+        if isinstance(default, int):
+            n = Store._number(value)
+            return int(n) if n is not None else default
+        if isinstance(default, float):
+            n = Store._number(value)
+            return float(n) if n is not None else default
+        if isinstance(default, str):
+            return value if isinstance(value, str) else default
+        if isinstance(default, list):
+            if not isinstance(value, list):
+                return copy.deepcopy(default)
+            out = [Store._coerce_value(d, v) for d, v in zip(default, value)] if default else \
+                [v for v in value if isinstance(v, (str, int, float))]
+            while len(out) < len(default):
+                out.append(copy.deepcopy(default[len(out)]))
+            return out
+        if isinstance(default, dict):
+            return value if isinstance(value, dict) else copy.deepcopy(default)
+        return value
+
+    @staticmethod
+    def _coerce_settings(settings):
+        """The settings inside a profile (or a preset) checked one by one against their own
+        defaults: this is where the "damaged config" hardening stopped before, so a number
+        stored as a string crashed the engine while it was starting. Keys that are not settings
+        (a marker from another build) are kept as they are."""
+        out = {}
+        for key, value in settings.items():
+            if key == "layout":
+                out[key] = Store._coerce_layout(value)
+            elif key in prefs.DEFAULTS:
+                row = prefs.ROWS.get(key)
+                # a row whose options are built at runtime (devices, drives, screens, the
+                # custom aspect ratios) writes values the static list does not hold: those are
+                # the user's own choices and must survive a load
+                dynamic = row is not None and (row.extra.get("dynamic") or key in ("aspect", "crop"))
+                out[key] = Store._coerce_choice(row, value) \
+                    if row is not None and row.options and not dynamic \
+                    else Store._coerce_value(prefs.DEFAULTS[key], value)
+            else:
+                out[key] = value
+        return out
+
+    @staticmethod
+    def _coerce_choice(row, value):
+        """A choice setting: the stored value has to be one of the row's own options — a value
+        from another build's label set (or a hand edit) used to reach the engine, which looks
+        options up by name and raised KeyError before the window existed."""
+        allowed = [o[0] if isinstance(o, (tuple, list)) and len(o) == 2 else o for o in row.options]
+        if isinstance(value, str) and value in allowed:
+            return value
+        return row.default
+
+    @staticmethod
+    def _coerce_layout(lay):
+        """A saved bar layout: named rows of element ids, every id a string."""
+        if not isinstance(lay, dict):
+            return {}
+        out = {}
+        for key in ("title_left", "title_center", "title_right", "rows"):
+            rows = lay.get(key)
+            if not isinstance(rows, list):
+                continue
+            if key == "rows":
+                out[key] = [[e for e in row if isinstance(e, str)] for row in rows if isinstance(row, list)]
+            else:
+                out[key] = [e for e in rows if isinstance(e, str)]
+        return out
+
+    @staticmethod
     def _coerce_list(key, value):
         """The same for lists: a list of the right type can still hold the wrong records."""
-        def records(items, needed):
-            return [it for it in items
-                    if isinstance(it, dict) and all(n in it for n in needed)]
-
         if key in ("video_folders", "music_folders", "favorites", "home_hidden"):
             return [v for v in value if isinstance(v, str)]
-        if key in ("recent", "recent_open"):
-            return records(value, ("item",))
+        if key == "recent":
+            out = []
+            for it in value:
+                if isinstance(it, dict) and isinstance(it.get("item"), str):
+                    out.append({"item": it["item"], "time": Store._number(it.get("time")) or 0})
+            return out
+        if key == "recent_open":
+            return [v for v in value if isinstance(v, str)]
         if key == "pinned":
-            return records(value, ("kind", "ref"))
+            out = []
+            for it in value:
+                if isinstance(it, dict) and isinstance(it.get("kind"), str) and isinstance(it.get("ref"), str):
+                    pin = dict(it)
+                    pin["name"] = it.get("name") if isinstance(it.get("name"), str) else it["ref"]
+                    out.append(pin)
+            return out
         if key == "playlists":
-            return records(value, ("id", "name"))
+            out = []
+            for it in value:
+                if not isinstance(it, dict) or not isinstance(it.get("id"), str) \
+                        or not isinstance(it.get("name"), str):
+                    continue
+                pl = dict(it)
+                items = it.get("items")
+                pl["items"] = [x for x in items if isinstance(x, str)] if isinstance(items, list) else []
+                if pl.get("thumb") is not None and not isinstance(pl["thumb"], str):
+                    pl["thumb"] = None
+                out.append(pl)
+            return out
         return value
 
     @staticmethod
@@ -231,48 +333,94 @@ class Store(QObject):
         of strings where records belong, a record without its id). Each family keeps only the
         entries that have what the rest of the code reads from them."""
         def records(items, needed):
-            out = []
-            for it in items:
-                if isinstance(it, dict) and all(n in it for n in needed):
-                    out.append(it)
-            return out
+            return [it for it in items
+                    if isinstance(it, dict) and all(isinstance(it.get(n), str) for n in needed)]
 
         if key == "profiles":
-            return {name: prof for name, prof in value.items() if isinstance(prof, dict)}
+            return {name: Store._coerce_settings(prof)
+                    for name, prof in value.items() if isinstance(name, str) and isinstance(prof, dict)}
         if key == "folder_presets":
             return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
         if key == "resume":
-            return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
+            out = {}
+            for path, rec in value.items():
+                if not isinstance(path, str) or not isinstance(rec, dict):
+                    continue
+                t, length, updated = (Store._number(rec.get("time")), Store._number(rec.get("length")),
+                                      Store._number(rec.get("updated")))
+                if t is None or length is None or updated is None:
+                    continue
+                entry = {"time": int(t), "length": int(length), "updated": updated}
+                size = Store._number(rec.get("size"))
+                if size is not None:
+                    entry["size"] = size
+                out[path] = entry
+            return out
         if key in ("watched", "plays", "visits", "playlist_visits"):
             return {k: v for k, v in value.items()
-                    if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)}
+                    if isinstance(k, str) and Store._number(v) is not None}
         if key in ("bookmarks", "external_subs", "external_audio"):
             out = {}
             for k, v in value.items():
-                if isinstance(k, str) and isinstance(v, list):
-                    out[k] = records(v, ("ms",)) if key == "bookmarks" else [x for x in v if isinstance(x, str)]
+                if not isinstance(k, str) or not isinstance(v, list):
+                    continue
+                if key == "bookmarks":
+                    marks = []
+                    for it in v:
+                        ms = Store._number(it.get("ms")) if isinstance(it, dict) else None
+                        if ms is not None:
+                            name = it.get("name")
+                            marks.append({"ms": ms, "name": name if isinstance(name, str) else ""})
+                    out[k] = marks
+                else:
+                    out[k] = [x for x in v if isinstance(x, str)]
             return out
         if key in ("hotkeys", "global_hotkeys"):
             return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
-        if key in ("presets", "views"):
+        if key == "presets":
+            return {k: Store._coerce_settings(v)
+                    for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
+        if key == "views":
             return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, dict)}
         if key == "network":
-            for part, needed in (("streams", ("name", "url")), ("lists", ("id", "name")),
-                                 ("podcasts", ("name", "url")), ("radio", ("name", "url"))):
-                if isinstance(value.get(part), list):
-                    value[part] = records(value[part], needed)
-            return value
+            out = {}
+            for part in ("streams", "lists", "podcasts", "radio"):
+                entries = value.get(part)
+                if not isinstance(entries, list):
+                    entries = []
+                if part == "lists":
+                    lists = records(entries, ("id", "name"))
+                    for entry in lists:
+                        items = entry.get("items")
+                        entry["items"] = records(items, ("url",)) if isinstance(items, list) else []
+                    out[part] = lists
+                else:
+                    out[part] = records(entries, ("name", "url"))
+            return out
         return value
 
     def _migrate(self, old):
-        """Carry over what the first version stored."""
-        new = {"onboarded": old.get("onboarded", False), "volume": old.get("volume", 80),
-               "geometry": old.get("geometry", ""), "resume": old.get("resume", {})}
-        folders = old.get("media_folders") or []
-        new["video_folders"] = list(folders)
-        new["bookmarks"] = {p: [{"ms": ms, "name": ""} for ms in marks]
-                            for p, marks in (old.get("bookmarks") or {}).items()}
-        new["network"] = {"streams": [{"name": u, "url": u} for u in old.get("recent_urls", [])],
+        """Carry over what the first version stored — as far as it can be read: the shapes are
+        checked here too, because a v1 config with a stray value in it used to stop the player
+        from starting before any of the hardening below could see it."""
+        def strings(value):
+            return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+        new = {"onboarded": old.get("onboarded") if isinstance(old.get("onboarded"), bool) else False,
+               "volume": Store._number(old.get("volume")) if Store._number(old.get("volume")) is not None else 80,
+               "geometry": old.get("geometry") if isinstance(old.get("geometry"), str) else "",
+               "resume": old.get("resume") if isinstance(old.get("resume"), dict) else {}}
+        new["video_folders"] = strings(old.get("media_folders"))
+        books = old.get("bookmarks")
+        marks_out = {}
+        if isinstance(books, dict):
+            for path, marks in books.items():
+                if not isinstance(path, str):
+                    continue
+                marks_out[path] = [{"ms": n, "name": ""} for n in
+                                   (Store._number(m) for m in marks if Store._number(m) is not None)]                     if isinstance(marks, list) else []
+        new["bookmarks"] = marks_out
+        new["network"] = {"streams": [{"name": u, "url": u} for u in strings(old.get("recent_urls"))],
                           "lists": [], "podcasts": [], "radio": []}
         return new
 
@@ -332,11 +480,12 @@ class Store(QObject):
 
     def reset_settings(self):
         prof = self._prof()
-        layout = prof.get("layout")
+        # everything that is not a Settings row is kept (the bar layout, the matcher's switch):
+        # clearing the profile used to take the user's choices with it
+        kept = {k: v for k, v in prof.items() if k not in prefs.DEFAULTS}
         old = {k: self.get(k) for k in prefs.DEFAULTS}
         prof.clear()
-        if layout is not None:
-            prof["layout"] = layout
+        prof.update(kept)
         self.save_later()
         for k, v in old.items():
             if self.get(k) != v:
@@ -397,7 +546,7 @@ class Store(QObject):
     # --- layout ----------------------------------------------------------
     def layout(self):
         lay = self._prof().get("layout")
-        if not lay:
+        if not isinstance(lay, dict) or not lay:
             return copy.deepcopy(DEFAULT_LAYOUT)
         out = copy.deepcopy(DEFAULT_LAYOUT)
         out.update(copy.deepcopy(lay))
@@ -429,6 +578,8 @@ class Store(QObject):
         self.libraryChanged.emit("recent")
 
     def add_recent_open(self, item):
+        if self.private(item):
+            return                        # "Matching files are left out of history" — all of it
         rec = [r for r in self.data["recent_open"] if r != item]
         self.data["recent_open"] = [item] + rec[:14]
         self.save_later()
@@ -514,6 +665,12 @@ class Store(QObject):
         return path in self.data["watched"]
 
     def mark_watched(self, path, value=True):
+        if self.private(path):
+            return                        # "Matching files are left out of history" — all of it
+        if value and self.data["resume"].pop(path, None) is not None:
+            # the two states contradict each other otherwise: Home would go on offering the
+            # file under Continue Watching with the watched tick on it
+            self.save_later()
         w = self.data["watched"]
         if value:
             if path in w:
@@ -706,6 +863,18 @@ class Store(QObject):
         self.data["presets"][name] = copy.deepcopy(values)
         self.save_later()
         self.libraryChanged.emit("presets")
+
+    def rename_preset(self, old, new):
+        """Rename a preset, and keep every folder bound to it bound to the new name."""
+        new = (new or "").strip()
+        if not new or new == old or old not in self.data["presets"] or new in self.data["presets"]:
+            return False
+        self.data["presets"][new] = self.data["presets"].pop(old)
+        for folder, bound in list(self.data["folder_presets"].items()):
+            if bound == old:
+                self.data["folder_presets"][folder] = new
+        self.save_later()
+        return True
 
     def remove_preset(self, name):
         self.data["presets"].pop(name, None)

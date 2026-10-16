@@ -34,9 +34,10 @@ DARK = {
     "knob_off": "#404040",
     "text": "#969696",           # normal text
     "text_2": "#6b6b6b",         # secondary text
-    "text_3": "#404040",         # placeholders
+    "text_3": "#5c5c5c",         # placeholders
     "text_hi": "#c6c6c6",        # selected nav item
     "text_max": "#eaeaea",
+    "on_video": "#e6e6e6",      # text over a video frame (the same in both themes: the picture is dark)
     "icon": "#8f8f8f",
     "shadow": "#000000",
     "dim": 0.45,                 # opacity of watched items
@@ -60,9 +61,10 @@ LIGHT = {
     "knob_off": "#a8a8a8",
     "text": "#2e2e2e",
     "text_2": "#6b6b6b",
-    "text_3": "#9a9a9a",
+    "text_3": "#8a8a8a",
     "text_hi": "#111111",
     "text_max": "#000000",
+    "on_video": "#e6e6e6",
     "icon": "#555555",
     "shadow": "#000000",
     "dim": 0.5,
@@ -231,6 +233,7 @@ SEMIBOLD = QFont.DemiBold
 _QSS = Template("""
 * { font-family: "$FONT"; color: $TEXT; }
 QLineEdit, QPlainTextEdit, QTextEdit, QMenu, QToolTip, QComboBox, QPushButton { font-size: 14px; }
+QInputDialog { background: $BASE; }
 QWidget { background: transparent; }
 QToolTip { background: $ITEM; color: $TEXT; border: 1px solid $LINE; padding: 5px 8px; border-radius: 4px; }
 QScrollArea { border: none; background: transparent; }
