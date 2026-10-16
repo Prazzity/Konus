@@ -109,15 +109,48 @@ def build_portable(version):
 def release_zip(folder, target):
     """Zip a built folder for the release page, print what it is made of. DEFLATE at level 6:
     the bundle's DLLs compress by half and the whole thing is written once, so the tar-time is
-    not worth a level 9 nobody unpacks twice."""
+    not worth a level 9 nobody unpacks twice.
+
+    The plugin cache gets one special treatment: it is stored in the archive with a date far in
+    the future. The cache is only read while it is newer than the plugins beside it (see
+    konus_common.stamp_plugin_cache), and extraction does not copy a zip's dates — Explorer,
+    7-Zip and Python's own zipfile all stamp the extracted files with the moment they are
+    written, in whatever order they come out. The order is what decides whether the cache wins
+    that race, so the cache is simply dated past anything an extraction can produce.
+
+    The archive is checked before it is left standing: if the cache inside would not come out
+    the newest file in its folder, the release would quietly carry the minute-long walk."""
     target.parent.mkdir(parents=True, exist_ok=True)
+    cache_name = None
     total = 0
+    entries = []
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        name = path.relative_to(folder.parent).as_posix()
+        if path.relative_to(folder).as_posix().endswith("runtime/libvlc/plugins/plugins.dat"):
+            cache_name = name
+        entries.append((path, name))
+        total += path.stat().st_size
+
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for path in sorted(folder.rglob("*")):
-            if path.is_file():
-                z.write(path, path.relative_to(folder.parent))
-                total += path.stat().st_size
-    print(f"zipped {folder.name}  ({total / 1e6:.0f} MB -> {target.stat().st_size / 1e6:.0f} MB)")
+        for path, name in entries:
+            if name == cache_name:
+                # 2099-12-31 23:59:58, the latest date the format stores. Anything an
+                # extraction writes keeps the clock it is run by, and this is ahead of it.
+                info = zipfile.ZipInfo(name, (2099, 12, 31, 23, 59, 58))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0x20
+                with open(path, "rb") as src:
+                    z.writestr(info, src.read())
+            else:
+                z.write(path, name)
+    print(f"zipped {folder.name}  ({total / 1e6:.0f} MB -> {target.stat().st_size / 1e6:.0f} MB)"
+          + (", plugin cache dated 2099" if cache_name else ""))
+    if not cache_name:
+        target.unlink()
+        raise SystemExit(f"{target.name} was dropped: it carries no plugin cache, so libVLC "
+                         "would walk the plugins folder at every start.")
 
 
 def find_iscc():

@@ -436,9 +436,12 @@ def instance_args(store, fx):
     if portable.is_portable():
         # A portable player does not write a configuration: on Windows libVLC otherwise keeps a
         # vlcrc beside the running executable (see konus.portable) — inside the bundle, or in
-        # the AppData a portable player is not supposed to touch. Nothing here relies on it:
+        # the AppData a portable player is not supposed to touch. `--ignore-config`, not
+        # `--no-config`: the second name does not exist in libVLC 3.0, and asking for it made
+        # the instance fail to start, so the engine built it a second time without the user's
+        # options — a wasted instance at every start. Nothing here relies on a configuration:
         # every option the player uses is passed with the instance (this list).
-        args.append("--no-config")
+        args.append("--ignore-config")
     # diagnostics
     verbosity = {"Errors only": 0, "Warnings": 1, "Everything": 2}.get(s("log_details"), 0)
     args.append(f"--verbose={verbosity}")

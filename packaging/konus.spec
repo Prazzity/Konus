@@ -12,6 +12,7 @@ do that, which is the whole difference between the two specs.
 """
 
 import sys
+from pathlib import Path
 
 sys.path.insert(0, SPECPATH)
 import konus_common as common
@@ -50,3 +51,7 @@ exe = EXE(
     version=common.write_version_resource(common.ROOT / "build" / "version_info.txt", "Konus.exe"),
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="Konus")
+
+# The plugin cache has to be newer than the plugins beside it or libVLC ignores it (see
+# konus_common.stamp_plugin_cache): without this the shipped folder is walked DLL by DLL.
+common.stamp_plugin_cache(Path(coll.name) / "_internal")

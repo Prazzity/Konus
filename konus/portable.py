@@ -87,28 +87,13 @@ def data_dir():
 
 
 def setup():
-    """Make the portable folders exist before the player asks for anything. Returns the data
-    folder when the player is portable, and None when it is not (or cannot be)."""
-    return data_dir()
-
-
-def vlc_config_path():
-    """Where libVLC is told to keep its own configuration, or None to leave that alone.
-
-    Only the portable build moves it, and only because there is a `data` folder to put it in.
-    libVLC's configuration is a `vlcrc` and an `vlc-qt-interface.ini`; what it writes there is
-    everything the player changed at runtime, and on Windows it otherwise falls back to the
-    folder of the running executable — inside the bundle, which is not where settings belong
-    even when the bundle happens to be writable."""
+    """Make the portable folders exist before the player asks for anything, and date the plugin
+    cache so libVLC reads it. Returns the data folder when the player is portable, and None when
+    it is not (or cannot be)."""
     data = data_dir()
-    if data is None:
-        return None
-    path = data / "vlc"
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
-    return str(path)
+    if data is not None:
+        stamp_plugin_cache()
+    return data
 
 
 def log_path():
@@ -116,6 +101,44 @@ def log_path():
     caller then keeps its usual place, %LOCALAPPDATA%\\konus)."""
     data = data_dir()
     return str(data / "konus-log.txt") if data is not None else None
+
+
+# The last date a file can carry before some tools refuse it: 2099-12-31 23:59:58.
+_NEVER = 4102358398.0
+
+
+def stamp_plugin_cache():
+    """Date the bundled plugin cache past every one of its plugins.
+
+    libVLC reads `plugins/plugins.dat` only while that file is at least as new as the plugins
+    beside it; one module with a later timestamp and it drops the list and opens all 360 DLLs
+    instead — the minute of a cold start (see fetch_libvlc.py and
+    packaging/konus_common.stamp_plugin_cache).
+
+    Nothing a build or an archive can do survives the last step of the way: unpacking rewrites
+    the dates, and Explorer, 7-Zip and Python's own zipfile each stamp the files with the
+    moment they were written — the plugin that comes out last ends up newer than the cache,
+    whichever order it was in the archive. So the player sets it here, once, on the first start
+    of a folder it has not stamped yet, with a date no later write can beat."""
+    root = target_root()
+    cache = root / "runtime" / "libvlc" / "plugins" / "plugins.dat"
+    if not cache.is_file():
+        return
+    try:
+        if cache.stat().st_mtime >= _NEVER:
+            return                       # stamped already (this is the cheap path: one stat)
+        newest = 0.0
+        for f in cache.parent.rglob("*"):
+            if f.is_file() and f != cache:
+                try:
+                    newest = max(newest, f.stat().st_mtime)
+                except OSError:
+                    pass
+        if cache.stat().st_mtime > newest:
+            return                       # newer than everything already: nothing to do
+        os.utime(cache, (_NEVER, _NEVER))
+    except OSError:
+        pass                             # read-only media: libVLC walks the folder, it still plays
 
 
 def is_portable():

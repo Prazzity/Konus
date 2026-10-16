@@ -6,6 +6,7 @@ folder) and the installer itself are then only about the shape of their output. 
 rules here is what keeps the builds in step: something new the app needs is one edit, not two.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -53,6 +54,43 @@ def portable_datas():
         (str(ROOT / "README.ru.md"), "."),
         (str(ROOT / "licenses" / "GPL-3.0.txt"), "licenses"),
     ]
+
+
+def stamp_plugin_cache(folder):
+    """Make the plugin cache in a built folder newer than every plugin beside it.
+
+    libVLC trusts `plugins/plugins.dat` only while it is at least as new as the folder's
+    plugins: `CacheLoad()` drops it the moment it finds a module file with a newer mtime and
+    walks all 360 DLLs instead — the minute of a cold start (see fetch_libvlc.py).
+
+    PyInstaller copies the runtime without the original timestamps, so in the built folder the
+    cache and the plugin DLLs all carry the moment they were copied, and some DLLs come out a
+    fraction of a second *after* the cache. That is enough for libVLC to reject it: the build
+    shipped a cache that was quietly not used. The cache is stamped a good gap ahead of the
+    newest plugin here, and after that the copies a build makes (and the second-level stamps a
+    zip would round to) cannot reach it.
+
+    Called by both specs after COLLECT, with the folder they just wrote."""
+    folder = Path(folder)
+    caches = list(folder.rglob("plugins.dat"))
+    if not caches:
+        return
+    for cache in caches:
+        if cache.parent.name != "plugins":
+            continue
+        newest = 0.0
+        for f in cache.parent.rglob("*"):
+            if f.is_file() and f != cache:
+                try:
+                    newest = max(newest, f.stat().st_mtime)
+                except OSError:
+                    pass
+        if cache.stat().st_mtime > newest:
+            continue
+        when = newest + 10
+        os.utime(cache, (when, when))
+        print(f"stamped {cache.relative_to(folder)} newer than the plugins beside it "
+              f"({newest:.3f} -> {when:.3f})")
 
 
 def translation_modules():

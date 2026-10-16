@@ -85,6 +85,11 @@ exe = EXE(
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="Konus-portable")
 
+# The plugin cache has to be newer than the plugins beside it or libVLC ignores it (see
+# konus_common.stamp_plugin_cache): this build keeps the runtime at the folder root, and a
+# cache that is "the same age" as the DLLs is a cache libVLC walks past.
+common.stamp_plugin_cache(Path(coll.name))
+
 # The data folder, there from the start so the unpacked folder reads as one whole thing.
 _data = Path(coll.name) / "data"
 _data.mkdir(parents=True, exist_ok=True)

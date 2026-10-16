@@ -29,10 +29,12 @@ sys.path.insert(0, HERE)
 warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 from konus import portable  # noqa: E402  (after sys.path, before anything reads a path)
+from konus import startup  # noqa: E402  (marks startup steps when KONUS_STARTUP_LOG is set)
 
 # The portable build settles on its data folder — creating it, or deciding it cannot and
 # falling back to AppData — before anything else can ask where its files go.
 portable.setup()
+startup.mark(f"data folder decided ({portable.data_dir() or 'AppData'})")
 
 # os.add_dll_directory() handles; keep them alive for the whole run.
 _VLC_DLL_DIRS = []
@@ -95,13 +97,6 @@ def setup_vlc_windows():
     plugins = os.path.join(d, "plugins")
     if os.path.isdir(plugins):
         os.environ.setdefault("PYTHON_VLC_MODULE_PATH", plugins)
-    # The portable build keeps libVLC's own configuration in its data folder as well (see
-    # konus.portable): on Windows libVLC otherwise falls back to the running executable's
-    # folder for vlcrc, which in a bundle is among the unpacked files. Installed builds and
-    # the source tree are left exactly as they were.
-    config = portable.vlc_config_path()
-    if config:
-        os.environ["VLC_CONFIG_PATH"] = config
     try:
         _VLC_DLL_DIRS.append(os.add_dll_directory(d))
     except (AttributeError, OSError):
@@ -128,12 +123,14 @@ def load_vlc_binding():
 def main():
     setup_vlc_windows()
     load_vlc_binding()
+    startup.mark("libvlc.dll located, python-vlc bound")
 
     from PyQt5.QtCore import Qt
     from PyQt5.QtNetwork import QLocalServer, QLocalSocket
     from PyQt5.QtWidgets import QApplication
 
     from konus import APP_ID, APP_NAME
+    startup.mark("PyQt imported")
 
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -146,6 +143,7 @@ def main():
 
     from konus.store import Store
     store = Store()
+    startup.mark("settings loaded")
 
     args = sys.argv[1:]
     uid = os.environ.get("USERNAME") or "user"
@@ -179,13 +177,20 @@ def main():
         i18n.set_language(store.get("language"))
 
     from konus.engine import Engine
+    from konus.engine import plugins_cache
     from konus.window import Shell
 
+    # The startup marks (konus.startup) note whether libVLC was given a usable plugin list:
+    # an unusable one means the engine walks all 360 plugins, which is the slow start this
+    # program has had twice.
+    startup.mark("plugin cache: " + (plugins_cache() or "none — libVLC will walk the plugins"))
     engine = Engine(store)
+    startup.mark("libVLC engine up")
     # `shell.win` is the window on screen, and stays so across a language switch: the switch
     # builds the interface again (see konus.i18n), which means a new window — everything here
     # goes through the shell so it is talking to the current one (see konus.window.Shell).
     shell = Shell(engine, store)
+    startup.mark("window built")
 
     server = None
     if store.get("single_window"):
@@ -220,6 +225,11 @@ def main():
     if store.get("start_in_tray") and shell.win.tray is not None and shell.win.tray.isVisible():
         pass
     else:
+        # With KONUS_STARTUP_LOG this marks the first painted frame; with KONUS_STARTUP_EXIT it
+        # closes the window right after it (the window, not the app: the tray would keep the
+        # process alive otherwise, see konus.startup). The watcher goes in before show(), or the
+        # first paint can slip past it.
+        startup.watch_window(shell.win, lambda: shell.win.close())
         shell.win.show()
     if not store["onboarded"]:
         from konus.onboarding import Onboarding

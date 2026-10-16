@@ -135,6 +135,11 @@ how the screenshot tool and anything else that starts the app keep out of your o
 with its own data folder also gets its own single-window slot, so it can sit next to a player that is already
 open instead of handing its files to it.
 
+`KONUS_STARTUP_LOG=<file>` writes down how long a start takes — the data folder, the settings, libVLC, the first
+painted frame, and whether libVLC was given a usable plugin list — and with `KONUS_STARTUP_EXIT` the app closes
+right after that frame, which is what a benchmark loop wants. Both are for measuring a "the window takes forever
+to appear" report, not for normal use.
+
 The README screenshots come from `tools/make_screenshots.py`, which runs the app for real and photographs its
 window; `--media` points at a folder of openly licensed films to show.
 

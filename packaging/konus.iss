@@ -64,7 +64,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\Konus\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\Konus\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Konus\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "runtime\libvlc\plugins\plugins.dat"
+; `touch` writes this file after every other one and dates it then — the cache has to be the
+; newest file in its folder or libVLC ignores it and walks all 360 plugins at every start (see
+; the comment in the [Code] section, and konus_common.stamp_plugin_cache).
+Source: "..\dist\Konus\_internal\runtime\libvlc\plugins\plugins.dat"; DestDir: "{app}\_internal\runtime\libvlc\plugins"; Flags: ignoreversion touch
 Source: "..\dist\Konus\vendor\*"; DestDir: "{app}\vendor"; Flags: ignoreversion recursesubdirs
 Source: "..\dist\Konus\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\Konus\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -79,6 +83,58 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+{ libVLC reads its list of modules from plugins\plugins.dat only while that file is at least as
+  new as the plugins beside it; find one module with a later timestamp and it drops the list
+  and opens all 360 DLLs instead — the minute of a cold start (see konus_common.stamp_plugin_
+  cache and fetch_libvlc.py). The files here are written by the installer, so they all carry
+  the moment of installation; the cache is pushed a couple of minutes ahead of that, which no
+  installed file can reach. Done through the Win32 calls: Inno's own script functions do not
+  carry a usable file-date pair. }
+const
+  GENERIC_WRITE = $40000000;
+  FILE_SHARE_READ_WRITE = 3;
+  OPEN_EXISTING = 3;
+  ATTR_NORMAL = $80;                  { FILE_ATTRIBUTE_NORMAL is Inno's own name }
+  TICKS_PER_MINUTE = 600000000;                { 100-ns ticks }
+
+function CreateFileW(lpFileName: String; dwDesiredAccess, dwShareMode: Cardinal;
+                     lpSecurityAttributes: Integer; dwCreationDisposition, dwFlagsAndAttributes: Cardinal;
+                     hTemplateFile: Integer): Integer;
+  external 'CreateFileW@kernel32.dll stdcall';
+function GetFileTime(hFile: Integer; var lpCreationTime, lpLastAccessTime, lpLastWriteTime: Int64): Boolean;
+  external 'GetFileTime@kernel32.dll stdcall';
+function SetFileTime(hFile: Integer; lpCreationTime, lpLastAccessTime: Integer; var lpLastWriteTime: Int64): Boolean;
+  external 'SetFileTime@kernel32.dll stdcall';
+function CloseHandle(hObject: Integer): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+procedure StampPluginCache();
+var
+  Cache: String;
+  Handle: Integer;
+  Created, Accessed, Written: Int64;
+begin
+  Cache := ExpandConstant('{app}\_internal\runtime\libvlc\plugins\plugins.dat');
+  if not FileExists(Cache) then
+    exit;
+  Handle := CreateFileW(Cache, GENERIC_WRITE, FILE_SHARE_READ_WRITE, 0, OPEN_EXISTING,
+                        ATTR_NORMAL, 0);
+  if Handle = -1 then
+    exit;
+  if GetFileTime(Handle, Created, Accessed, Written) then
+  begin
+    Written := Written + 2 * TICKS_PER_MINUTE;
+    SetFileTime(Handle, 0, 0, Written);
+  end;
+  CloseHandle(Handle);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    StampPluginCache();
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ConfigDir, CacheDir: String;
