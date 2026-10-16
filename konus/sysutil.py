@@ -1,5 +1,6 @@
 """Small Windows helpers: opening folders in Explorer, keeping a window on top, the VLC Lua
-extension folders, the drive list for the disc dialog and the dark caption on native dialogs.
+extension folders, the drive list for the disc dialog, the dark caption on native dialogs, and
+keeping a console window out of the ones — ffmpeg among them — the player runs behind itself.
 """
 
 import ctypes
@@ -7,6 +8,20 @@ import os
 import subprocess
 from ctypes import wintypes
 from pathlib import Path
+
+#: Windows only, from the API rather than a literal: subprocess.CREATE_NO_WINDOW. Zero
+#: everywhere else, where a child process has no window to hide.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def quiet_process():
+    """Create-process flags for a command-line tool run from this windowed app.
+
+    A GUI program that starts a console program gets a console window for it — a black flash
+    for every ffprobe, and a row of them in the taskbar while a folder's previews are made.
+    In a console the app was run from (the source tree's run.bat) there is no such window at
+    all, which is why this only shows in the builds."""
+    return CREATE_NO_WINDOW
 
 
 def open_path(path):
@@ -16,7 +31,8 @@ def open_path(path):
 
 def reveal(path):
     """Show a file with its folder open and the file selected."""
-    subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
+    subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))],
+                     creationflags=CREATE_NO_WINDOW)
 
 
 def set_above(widget, on):

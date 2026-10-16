@@ -20,6 +20,7 @@ from pathlib import Path
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 
+from . import sysutil
 from .engine import AUDIO_EXT, SUB_EXT, VIDEO_EXT, ext, is_url, media_in_dir
 from .store import cache_dir
 
@@ -71,7 +72,8 @@ def _key(path):
 
 def _run(args, timeout=30):
     try:
-        return subprocess.run(args, capture_output=True, timeout=timeout)
+        return subprocess.run(args, capture_output=True, timeout=timeout,
+                              creationflags=sysutil.quiet_process())
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -323,7 +325,8 @@ class MediaService(QObject):
     def _make_wave(self, path, out, bins):
         try:
             proc = subprocess.Popen([FFMPEG, "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "2000",
-                                     "-f", "s16le", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                     "-f", "s16le", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    creationflags=sysutil.quiet_process())
             raw = proc.stdout.read()
             proc.wait(timeout=120)
         except (OSError, subprocess.TimeoutExpired):

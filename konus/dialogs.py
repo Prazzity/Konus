@@ -1335,7 +1335,8 @@ class PropertiesDialog(Dialog):
                 r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                                     "format=duration,bit_rate:stream=codec_type,codec_long_name,width,height,"
                                     "r_frame_rate,channels,sample_rate:stream_tags=language,title", "-of", "json",
-                                    self.item], capture_output=True, timeout=10)
+                                    self.item], capture_output=True, timeout=10,
+                                   creationflags=sysutil.quiet_process())
                 try:
                     data = json.loads(r.stdout or b"{}")
                     fmt = data.get("format", {})

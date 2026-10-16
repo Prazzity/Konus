@@ -32,7 +32,7 @@ from PyQt5.QtCore import QObject, QProcess, QTimer, pyqtSignal
 import vlc
 
 from . import APP_ID, APP_NAME, __version__, portable, prefs
-from . import diag
+from . import diag, sysutil
 from .i18n import tr
 from .store import cache_dir
 
@@ -152,7 +152,8 @@ def subtitle_stream(src, tid, embedded):
     if not shutil.which("ffprobe"):
         return None                           # no ffprobe: keep the track as it is
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index",
-                        "-of", "csv=p=0", src], capture_output=True, text=True, timeout=30)
+                        "-of", "csv=p=0", src], capture_output=True, text=True, timeout=30,
+                       creationflags=sysutil.quiet_process())
     indexes = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
     if set(embedded) <= set(indexes):
         return f"0:{tid}"                     # Matroska: libVLC's track ids are the stream numbers
@@ -171,7 +172,8 @@ def make_plain_subs(src, tid, embedded, dest):
         if not stream:
             return False
         r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-map", stream, "-f", "srt", tmp],
-                           capture_output=True, timeout=120)
+                           capture_output=True, timeout=120,
+                           creationflags=sysutil.quiet_process())
         if r.returncode != 0 or not os.path.getsize(tmp):
             return False
         with open(tmp, encoding="utf-8", errors="replace") as f:
