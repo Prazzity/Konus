@@ -2544,8 +2544,10 @@ class MainWindow(QWidget):
             else:
                 self.hint.hide_soon()
             return True
-        if ev.type() in (QEvent.MouseButtonPress, QEvent.Wheel, QEvent.KeyPress, QEvent.Leave):
+        if ev.type() in (QEvent.MouseButtonPress, QEvent.Wheel, QEvent.KeyPress):
             self.hint.hide_soon()
+        elif ev.type() == QEvent.Leave:
+            self._hint_may_leave(obj)
         # Every window the app puts on screen gets the app's colour as its class background
         # brush. The brush belongs to the class, so this covers each kind of window — dialogs
         # and panels included — the first time one of them is shown (see wm.erase_colour).
@@ -2560,6 +2562,28 @@ class MainWindow(QWidget):
             self._edge_cursor = False
             self.unsetCursor()
         return False
+
+    def _hint_may_leave(self, obj):
+        """The hint card is put up under the pointer, so the surface that was being hovered
+        sends a Leave the moment it appears. Reading every Leave as "the pointer is gone" is
+        what made a hint vanish right after coming up, and — since moving to the neighbour
+        icon crosses the card on the way — the hint of the icon being left. The pointer has
+        really gone when it left the window the hint belongs to, or a window that is not one
+        of these cards (the bars' popups, a dialog)."""
+        if not isinstance(obj, QWidget):
+            return
+        for w in (self.hint, getattr(self, "toast", None)):
+            if w is not None and (obj is w or w.isAncestorOf(obj)):
+                return
+        if obj is self:
+            self.hint.hide_soon()
+            return
+        top = obj.window()
+        if top is not self and top.isActiveWindow():
+            # A popup or dialog of its own — Preferences, a menu: the pointer leaving it is
+            # the pointer leaving the hint's world too, and the next hint will come with the
+            # next tooltip.
+            self.hint.hide_soon()
 
     def paintEvent(self, e):
         p = QPainter(self)

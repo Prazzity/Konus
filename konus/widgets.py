@@ -679,8 +679,23 @@ class Hint(QWidget):
         self.MARGIN = 16
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(self.FADE_IN_MS)
+        self._fade.finished.connect(self._fade_done)
+        # Which fade the animation is running: one that was interrupted (a new hint came in
+        # while the old one was fading out) finishes into a "stale" generation and must not
+        # hide the card that replaced it — that was the hint that appeared and vanished again
+        # in a fraction of a second.
+        self._generation = 0
         self._away = QTimer(self, singleShot=True, timeout=self.hide_soon)
         self.hide()
+
+    def _fade_done(self):
+        if self._generation < 0:
+            self.hide()
+
+    def _stop_fade(self):
+        """Stop whatever the fade is doing and make sure its finish does nothing."""
+        self._generation = -1
+        self._fade.stop()
 
     @staticmethod
     def plain(text):
@@ -716,7 +731,12 @@ class Hint(QWidget):
             self.show()
         self.raise_()
         self.update()
-        self._fade.stop()
+        # A running fade-out is dropped, not merely replaced: its own finish would come a
+        # moment later and hide the card this call has just put up. The generation makes the
+        # two phases tellable apart, so the finish of a fade that is no longer the current
+        # one does nothing at all.
+        self._stop_fade()
+        self._generation += 1
         self._fade.setDuration(self.FADE_IN_MS)
         self._fade.setStartValue(self.windowOpacity())
         self._fade.setEndValue(1.0)
@@ -726,15 +746,10 @@ class Hint(QWidget):
     def hide_soon(self):
         if not self.isVisible():
             return
-        self._fade.stop()
+        self._stop_fade()
         self._fade.setDuration(self.FADE_OUT_MS)
         self._fade.setStartValue(self.windowOpacity())
         self._fade.setEndValue(0.0)
-        try:
-            self._fade.finished.disconnect()
-        except TypeError:
-            pass
-        self._fade.finished.connect(self.hide)
         self._fade.start()
 
     def paintEvent(self, e):
