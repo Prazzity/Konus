@@ -15,6 +15,10 @@ Translations live in `i18n_<code>.py` next to this file as a plain dict:
 
     TABLE = {"Play": "Воспроизвести", ...}
 
+The English table holds only the strings that are not their own key: a few are looked up
+under a namespaced key, so that their plain word stays free for another meaning (see
+konus/i18n_en.py). Everything else is shown as written in the code.
+
 Strings that hold placeholders are written the same way and formatted at the call
 site, e.g. tr("Added {n} to {name}").format(n=3, name=title).
 
@@ -94,7 +98,7 @@ def system_language():
 def in_language(code, text):
     """`text` in `code`, whether or not that language is the one in use. The language screen
     labels its own button with the word of the language being picked (see konus.language)."""
-    return _load(code).get(text, text) if code != FALLBACK else text
+    return _load(code).get(text, text)
 
 
 def set_language(name):
@@ -104,7 +108,7 @@ def set_language(name):
     if code == "system":
         code = detect_system()
     _current = code
-    _table = _load(code) if code != "en" else {}
+    _table = _load(code)
     return _current
 
 

@@ -846,7 +846,7 @@ class Toggle(QAbstractButton):
             p.drawRoundedRect(QRectF(32, 3, 33, 26), 3, 3)
             p.setBrush(c("knob_off"))
             p.drawRoundedRect(QRectF(3, 3, 26, 26), 3, 3)
-            p.setPen(c("text_2"))
+            p.setPen(c("text_3"))
             p.drawText(QRectF(32, 3, 33, 26), Qt.AlignCenter, tr("OFF"))
 
 
@@ -2118,8 +2118,8 @@ class Expander(QAbstractButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(c("field") if self.dark else c("rail", 0.6))
-        p.drawRoundedRect(QRectF(self.rect()), 6, 6)
+        p.setBrush(c("field") if self.dark else c("rail", 0.88))
+        p.drawRoundedRect(QRectF(self.rect()), 8, 8)
         f = theme.font(14)
         p.setFont(f)
         text = self.open_text if self.isChecked() else self.label
@@ -2140,8 +2140,10 @@ class InfoIcon(QLabel):
 
     def __init__(self, text, parent=None, translated=False):
         super().__init__(parent)
-        self.setPixmap(icons.pixmap("info", 16, c("text_3")))
-        self.setFixedSize(16, 16)
+        # 18 px for a 16 px ring: the pixmap carries a pixel of air, which is what the design's
+        # icon measures once its own antialiased edge is counted
+        self.setPixmap(icons.pixmap("info", 18, c("text_3")))
+        self.setFixedSize(18, 18)
         # `translated`: the caller has translated the parts already (the settings rows do, each
         # half on its own, so the explanation stays readable in the user's language)
         self.setToolTip(f"<div style='max-width:320px'>{text if translated else tr(text)}</div>")

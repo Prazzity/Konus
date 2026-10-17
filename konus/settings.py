@@ -8,8 +8,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFontDatabase, QPainter
+from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFontDatabase, QFontMetrics, QPainter
 from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout, QLineEdit, QScrollArea, QVBoxLayout,
                              QWidget)
 
@@ -28,7 +28,7 @@ class AccentPicker(QWidget):
     def __init__(self, value):
         super().__init__()
         self.value = value
-        self.setFixedSize(318, 34)
+        self.setFixedSize(318, 36)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_value(self, v):
@@ -76,11 +76,13 @@ class PathRow(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(12)
         self.edit = QLineEdit(value or "")
-        self.edit.setFixedHeight(32)
+        # 36 like the other fields: the design draws the input's frame at the height of a
+        # dropdown's, with the Browse button beside it 32 tall, centred
+        self.edit.setFixedHeight(36)
         self.edit.setFixedWidth(206)
         self.edit.editingFinished.connect(lambda: self.changed.emit(self.edit.text().strip()))
         h.addWidget(self.edit)
-        b = Button("Browse", "ghost", height=32)
+        b = Button("Browse", "face", height=32)
         b.setFixedWidth(100)
         b.clicked.connect(self._browse)
         h.addWidget(b)
@@ -189,7 +191,7 @@ class CategoryItem(QWidget):
         if self.selected or self._hover:
             p.setPen(Qt.NoPen)
             p.setBrush(c("hover_2") if self.selected else c("hover"))
-            p.drawRoundedRect(QRectF(self.rect()), 2, 2)
+            p.drawRoundedRect(QRectF(self.rect()), 8, 8)
         p.drawPixmap(8, 8, icons.pixmap(self.icon, 24, None, "active" if self.selected else ""))
         p.setFont(theme.font(14))
         p.setPen(c("text_max") if self.selected else c("icon"))
@@ -217,7 +219,7 @@ class SettingsDialog(QDialog):
         hh.setContentsMargins(8, 8, 14, 8)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("Search"))
-        self.search.setFixedSize(200, 34)
+        self.search.setFixedSize(200, 34)          # the rail card's width: see _align_search
         self.search.addAction(icons.icon("search", 24), QLineEdit.LeadingPosition)
         self.search.setStyleSheet(f"QLineEdit {{ background: {theme.hexc('field_2')}; border-radius: 6px; "
                                   f"padding-left: 8px; }}")
@@ -234,9 +236,6 @@ class SettingsDialog(QDialog):
         body = QHBoxLayout()
         body.setSpacing(0)
         nav = QWidget()
-        # 216 was the design width, but the rail scrolls now and its bar takes 10 px of it: with
-        # that gone the longest labels ("Производительность") were clipped at the panel edge
-        nav.setFixedWidth(240)
         nv = QVBoxLayout(nav)
         nv.setContentsMargins(8, 8, 8, 8)
         self.navcard = QWidget()
@@ -256,14 +255,24 @@ class SettingsDialog(QDialog):
             cv.addWidget(it)
             self.items[cat.key] = it
         cv.addStretch(1)
+        # 216 is the width of the rail column in the design: a 200 px card with 8 px either side,
+        # and the search field above it the width of that same card. A language with longer names
+        # needs more than the design does — the longest label starts 50 px into the card and has
+        # to fit in what is left (the card is then that much wider, and the field follows it: see
+        # _align_search) — and the rail's bar takes 10 px of the column when it appears.
+        fm = QFontMetrics(theme.font(14))
+        widest = max(fm.horizontalAdvance(it.label) for it in self.items.values())
+        nav.setFixedWidth(max(216, widest + 86))
         navscroll = QScrollArea()
         navscroll.setWidgetResizable(True)
         navscroll.setFrameShape(QScrollArea.NoFrame)
         navscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         navscroll.setWidget(self.navcard)
+        navscroll.verticalScrollBar().rangeChanged.connect(lambda *_: self._align_search())
         nv.addWidget(navscroll, 1)
         body.addWidget(nav)
         self.nav = nav
+        self.navscroll = navscroll
         self.area = QScrollArea()
         self.area.setWidgetResizable(True)
         # as needed, not off: on a narrow screen (the card is clamped there) the form is wider
@@ -279,6 +288,12 @@ class SettingsDialog(QDialog):
         self.store.settingChanged.connect(self._external_change)
 
     # --- layout --------------------------------------------------------------
+    def _align_search(self):
+        """The search field takes the width of the rail card, so the two boxes stand on the same
+        two lines — that is how the design draws them. The card loses 10 px to the rail's bar
+        when the rail overflows (a short screen), and the field follows it there."""
+        self.search.setFixedWidth(max(120, self.navcard.width()))
+
     def show_category(self, key):
         self.current_category = key
         self.search.blockSignals(True)
@@ -318,7 +333,10 @@ class SettingsDialog(QDialog):
         self.controls = {}
         page = QWidget()
         v = QVBoxLayout(page)
-        v.setContentsMargins(24, 16, 24, 30)
+        # the pane's own padding in the design: 33 px to the first label's column, 26 to the
+        # right edge of the controls; the 29 px before the first heading (below) is what sets
+        # the 33 px between the header and that heading, so nothing is added on top here
+        v.setContentsMargins(33, 0, 26, 30)
         v.setSpacing(0)
         if not groups:
             v.addWidget(Label("No settings match.", 14, "text_2"))
@@ -330,8 +348,8 @@ class SettingsDialog(QDialog):
             for s in sections:
                 if s.advanced and not searching:
                     if adv_host is None:
-                        v.addSpacing(16)
-                        exp = Expander("Advanced Options", height=48)
+                        v.addSpacing(20)
+                        exp = Expander("Advanced Options", height=38)
                         v.addWidget(exp)
                         adv_host = QWidget()
                         adv_lay = QVBoxLayout(adv_host)
@@ -346,8 +364,8 @@ class SettingsDialog(QDialog):
                 else:
                     target = v
                 if s.title != "Advanced Options":
-                    target.addSpacing(18)
-                    target.addWidget(Label(s.title, 16, "text_hi", weight=theme.MEDIUM))
+                    target.addSpacing(29)
+                    target.addWidget(Label(s.title, 16, "text_max", weight=theme.MEDIUM))
                     target.addSpacing(10)
                 for r in s.rows:
                     if r.extra.get("hidden"):
@@ -371,6 +389,9 @@ class SettingsDialog(QDialog):
         lab = Label(r.label, 14, "text")
         h.addWidget(lab)
         if r.info or r.disabled:
+            # the design keeps a gap of its own between a label and its (i): the label's widget
+            # is a little wider than its text, so the row's own spacing is not that gap
+            h.addSpacing(8)
             # The two halves are translated before they are joined: the table has no key with the
             # "<br><br><i>" in it, so every row with a reason used to show English in Russian.
             info = tr(r.info) if r.info else ""
@@ -425,11 +446,11 @@ class SettingsDialog(QDialog):
             if r.extra.get("vizicons"):
                 vi = {"Spectometer": "spectometer", "Scope": "scope", "Spectrum": "spectrum", "Waveform": "waveform"}
                 icon_for = lambda v, vi=vi: vi.get(v)
-            w = Dropdown(opts, val, height=34, icon_for=icon_for)
+            w = Dropdown(opts, val, height=36, icon_for=icon_for)
             w.setFixedWidth(318)
             w.changed.connect(lambda v, key=r.key: self._set(key, v))
         elif k == "segmented":
-            w = Segmented(tr_opts(r.options), val, height=34)
+            w = Segmented(tr_opts(r.options), val, height=36)
             w.setFixedWidth(318)
             w.changed.connect(lambda v, key=r.key: self._set(key, v))
         elif k == "accent":
@@ -465,7 +486,7 @@ class SettingsDialog(QDialog):
             fams = [""] + sorted(set(QFontDatabase().families()))
             if r.extra.get("mono"):
                 fams = [""] + [f for f in fams[1:] if QFontDatabase().isFixedPitch(f)]
-            w = Dropdown([(f, f or "System default") for f in fams], val or "", height=34)
+            w = Dropdown([(f, f or "System default") for f in fams], val or "", height=36)
             w.setFixedWidth(318)
             w.changed.connect(lambda v, key=r.key: self._set(key, v))
         elif k == "color":
@@ -668,11 +689,15 @@ class SettingsDialog(QDialog):
         path.addRoundedRect(r, 14, 14)
         p.setClipPath(path)
         p.fillRect(QRectF(r.left(), r.top(), r.width(), 50), c("panel_head"))
-        p.fillRect(QRectF(r.left() + 216, r.top() + 50, r.width() - 216, r.height() - 50), c("rail", 0.95))
         p.setClipping(False)
+        # The rail is the only card in the design: the page beside it is the dialog's own
+        # surface, not a lighter panel — painting one there left the card invisible.
+        # Where the card stands is asked of the card itself: its own geometry is in the scroll
+        # area's coordinates, and translating that by the rail's position alone drew it 8 px up
+        # and to the left of the items it holds (and never followed the rail as it scrolled).
         p.setBrush(c("rail", 0.95))
-        g = self.navcard.geometry().translated(self.nav.pos())
-        p.drawRoundedRect(QRectF(g), 6, 6)
+        corner = self.navcard.mapTo(self, QPoint(0, 0))
+        p.drawRoundedRect(QRectF(corner.x(), corner.y(), self.navcard.width(), self.navcard.height()), 8, 8)
 
     def showEvent(self, e):
         # Built at the size the design calls for; on a screen that cannot hold it (a 1280x720
@@ -683,6 +708,8 @@ class SettingsDialog(QDialog):
             g = par.window().frameGeometry()
             self.move(g.center() - self.rect().center())
         clamp_position(self)
+        # the rail is laid out by now, so its card's width is known — the search field needs it
+        self._align_search()
         super().showEvent(e)
 
     def mousePressEvent(self, e):
