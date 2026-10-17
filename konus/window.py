@@ -12,8 +12,9 @@ import time
 import webbrowser
 from urllib.parse import unquote, urlparse
 
-from PyQt5.QtCore import (QAbstractAnimation, QByteArray, QEasingCurve, QEvent, QObject, QPoint,
-                            QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer, QUrl, pyqtSignal)
+from PyQt5.QtCore import (QAbstractAnimation, QByteArray, QEasingCurve, QElapsedTimer, QEvent,
+                            QObject, QPoint, QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer,
+                            QUrl, pyqtSignal)
 from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPixmap, QRegion
 from PyQt5.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog, QMenu, QShortcut,
                              QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
@@ -133,6 +134,125 @@ class Shell:
         return self.win
 
 
+class _GeometryDriver(QObject):
+    """The window's geometry from one rectangle to another, a frame per fixed step of a clock.
+
+    A QPropertyAnimation waits for the next frame only once the current one has been drawn, so
+    the frame after a cheap one comes 16 ms later and the frame after an expensive one 16 ms
+    plus whatever it cost: measured on the real window, the steps came at 19, 25, 28, 41, 44 ms.
+    The geometry was right in every one of them — it is that unevenness that the eye reads as a
+    jerk, and no amount of shortening the animation removes it. Here frame n is due at
+    `start + n * interval` whatever the frame before it cost, so the steps come evenly and the
+    motion is smooth even when the machine can only afford a coarse rate.
+
+    Two rules keep it honest. A frame that does not fit inside its step starts the count again
+    instead of pulling a burst of catch-up frames after it — the animation lasts as long as it
+    was told to either way, because the geometry follows the clock rather than a frame counter.
+    And the step is not guessed: it starts at 16 ms (60 frames a second, which is what a screen
+    can show at all) and every frame measures what it cost, so a machine that cannot hold that
+    rate lengthens the step in its very first animation rather than after a few. The step comes
+    out right the first time the window is grown, and stays there.
+
+    What the step should be is kept on the window, not on the driver: what one animation learned
+    about this machine is what the next one starts from.
+    """
+
+    MIN_MS, MAX_MS, STEP_MS = 16, 50, 4
+    #: What the paint that follows a frame costs, plus the compositor's own time — the part of a
+    #: frame the measurement above cannot see, because it happens after the frame's work is done.
+    HEADROOM_MS = 6
+    #: Frames that have to fit before the step is shortened again.
+    CLEAN_FRAMES = 2
+
+    def __init__(self, window, target, ms, done):
+        super().__init__(window)
+        self.win = window
+        self.start_rect = QRect(window.geometry())
+        self.target = QRect(target)
+        self.ms = max(1, ms)
+        self.done = done
+        self.interval = max(self.MIN_MS, min(self.MAX_MS, window._anim_interval))
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.timeout.connect(self._tick)
+        self.clock = QElapsedTimer()
+        self.origin = 0                       # ms already spent before the clock was restarted
+        self.due_n = 0                        # which step of the clock the next frame belongs to
+        self.overran = False
+        self.clean = 0                        # frames in a row that fitted inside their step
+
+    def start(self):
+        self.clock.start()
+        self._tick()
+
+    def _rect(self, progress):
+        v = self.win.CURVE.valueForProgress(progress)
+        s, e = self.start_rect, self.target
+        return QRect(int(round(s.x() + (e.x() - s.x()) * v)),
+                     int(round(s.y() + (e.y() - s.y()) * v)),
+                     int(round(s.width() + (e.width() - s.width()) * v)),
+                     int(round(s.height() + (e.height() - s.height()) * v)))
+
+    def _tick(self):
+        began = time.perf_counter()
+        elapsed = self.origin + self.clock.elapsed()
+        progress = min(1.0, elapsed / self.ms)
+        self.win.setGeometry(self._rect(progress))
+        cost = (time.perf_counter() - began) * 1000
+        if progress >= 1.0:
+            self.win._learn_rate(self.overran)
+            self.done()
+            return
+        self.due_n += 1
+        due, now = self.due_n * self.interval, self.clock.elapsed()
+        if due <= now:
+            # this frame did not fit its step: the next one gets a whole step of its own rather
+            # than the animation firing a burst of frames to catch up with the clock, which
+            # would look exactly like the jerk this class exists to remove. It also means the
+            # step was too short for this machine — what it costs is measured below, so there is
+            # nothing to learn from the miss here beyond that.
+            self.overran = True
+            self.origin += now
+            self.clock.restart()
+            self.due_n, due, now = 0, self.interval, 0
+        self._respace(cost)
+        self.timer.start(max(1, due - now))
+
+    def _respace(self, cost):
+        """Set the step for the frames still to come from what this frame cost.
+
+        The step has to hold everything a frame brings: the resize with its layout and its
+        native child, the paint the system asks for afterwards, and the compositor's own time.
+        The frame measures itself, so the paint that follows it is covered by HEADROOM_MS, and a
+        frame that was late despite that lengthens the step at once — the animation is at the
+        right rate before it is half over, on the first growth after the application started,
+        rather than after a few of them.
+
+        Shortening goes the other way: only after CLEAN_FRAMES frames that fitted, and only down
+        to a floor this machine has been seen to miss. Without the floor the step would fall back
+        to 16 ms as soon as a cheap frame came along and rise again on the next late one, and a
+        rate that keeps changing is a rate that keeps jerking."""
+        want = self._step_round(cost + self.HEADROOM_MS)
+        if self.overran:
+            self.win._anim_floor = max(self.win._anim_floor,
+                                       min(self.MAX_MS, self.interval + self.STEP_MS))
+            self.clean = 0
+        if want > self.interval:
+            self.interval = min(self.MAX_MS, want)
+        elif self.clean >= self.CLEAN_FRAMES:
+            self.interval = max(self.win._anim_floor, self.MIN_MS, want,
+                                self.interval - 2 * self.STEP_MS)
+            self.clean = 0
+        else:
+            self.clean += 1
+
+    def _step_round(self, ms):
+        """The next step at or above `ms`, in whole steps — a step is either 16 ms or 24, not 19."""
+        return max(self.MIN_MS, min(self.MAX_MS,
+                                    ((int(ms) + self.STEP_MS - 1) // self.STEP_MS) * self.STEP_MS))
+
+
 class MainWindow(QWidget):
     def __init__(self, engine, store):
         # WindowMinimizeButtonHint draws nothing (the window is frameless) but it makes Windows
@@ -155,6 +275,12 @@ class MainWindow(QWidget):
         # the control bar needs 780 px of its own (seek + transport + volume): a narrower
         # window squeezed its elements on top of each other
         self.setMinimumSize(800, 420)
+        #: How long one frame of the maximize/restore animation may take, in ms, and the
+        #: shortest step this machine has been seen to miss. Both are measured by the animations
+        #: themselves (see _GeometryDriver) and kept here, so the next one starts from what this
+        #: machine turned out to be able to draw instead of finding out again.
+        self._anim_interval = _GeometryDriver.MIN_MS
+        self._anim_floor = _GeometryDriver.MIN_MS
         self.mode = "player"
         self.hide_ui = False
         self.pip = None
@@ -1362,13 +1488,12 @@ class MainWindow(QWidget):
 
     # Windows animates these (the window grows into place instead of jumping); a frameless
     # window gets none of it, so the geometry is animated here. The duration is the speed and is
-    # kept short — 180 ms to grow, 150 ms back. Smoothness is the step the window's edge takes
-    # per frame, and the frames are the machine's: one costs ~25 ms (the window's own resize with
-    # its native child windows, plus the page repaint), so 180 ms buys seven or eight steps and a
-    # shorter animation would only make them coarser. The curve is how the distance is shared
-    # between them — InOutSine barely moves at the ends and puts its biggest step in the middle,
-    # where the slowest frames land; this one is the same ease-in-out with a flatter middle (a
-    # quicker start measures no better: the steps come out the same size).
+    # kept short — 180 ms to grow, 150 ms back — and the frames inside it are spent by the
+    # driver (see _GeometryDriver), evenly, at whatever rate this machine can draw them.
+    #
+    # The curve is how the distance is shared between the frames: InOutSine barely moves at the
+    # ends and puts its biggest step in the middle; this one is the same ease-in-out with a
+    # flatter middle, so the step does not grow just where the machine is slowest.
     MAX_MS = 180
     RESTORE_MS = 150
     CURVE = QEasingCurve()
@@ -1412,24 +1537,62 @@ class MainWindow(QWidget):
         return screen.availableGeometry().adjusted(60, 60, -60, -60) if screen else QRect(self.geometry())
 
     def _anim_geometry(self, obj, target, ms, done):
-        anim = QPropertyAnimation(obj, b"geometry", self)
-        anim.setDuration(ms)
-        anim.setStartValue(obj.geometry())
-        anim.setEndValue(target)
-        anim.setEasingCurve(self.CURVE)
-        # Each step resizes the window, and resizeEvent paints the strip it opens up in that same
-        # turn (see _flush_growth_strip), so nothing has to be repainted here as well.
-        self._geo_anim = anim
+        """Grow (or shrink) the window into `target`, in evenly spaced frames.
 
+        Only the window itself goes through the fixed-cadence driver; anything else keeps Qt's
+        own property animation. Which of the two is used is decided by the caller passing `self`
+        as `obj`, and the driver is only good for a window of the application's own.
+        """
         def finish():
             self._geo_anim = None
             try:
                 done()
             except Exception as exc:
                 diag.log("window", event="anim-finish-failed", error=f"{type(exc).__name__}: {exc}")
+            finally:
+                self._after_geometry_animation()
 
-        anim.finished.connect(finish)
-        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        if obj is not self:
+            anim = QPropertyAnimation(obj, b"geometry", self)
+            anim.setDuration(ms)
+            anim.setStartValue(obj.geometry())
+            anim.setEndValue(target)
+            anim.setEasingCurve(self.CURVE)
+            self._geo_anim = anim
+            anim.finished.connect(finish)
+            anim.start(QAbstractAnimation.DeleteWhenStopped)
+            return
+
+        driver = _GeometryDriver(self, target, ms, finish)
+        self._geo_anim = driver
+        driver.start()
+
+    def _learn_rate(self, overran):
+        """Let the floor go, a step per animation, when nothing had to be lengthened.
+
+        A floor is what keeps the step from being shortened after every cheap frame and lengthened
+        again after the next late one, but a floor raised by one slow animation of one film would
+        otherwise hold every animation after it coarse — the library page would grow at 24 ms
+        because a film once made it miss 16. One step per animation that came out clean is slow
+        enough to keep the oscillation out and quick enough that the next state of the window is
+        animated at its own rate."""
+        if not overran:
+            self._anim_floor = max(_GeometryDriver.MIN_MS,
+                                   self._anim_floor - _GeometryDriver.STEP_MS)
+
+    def _after_geometry_animation(self):
+        """Put back the one thing the animation left out, once the window has stopped moving.
+
+        The video's rounded mask is a SetWindowRgn on a native child window, and Windows answers
+        one with a WM_WINDOWPOSCHANGING/WM_WINDOWPOSCHANGED pair and a full redraw of that
+        child — measured at ~1 ms of the ~8 ms a frame cost, and it paints the video area black
+        on the way. Every frame is the wrong place for it: the corners are nine pixels of a
+        window that is moving, and nobody sees them until it stops."""
+        try:
+            video = self.player.video
+            video.set_radius(video.radius)
+        except (RuntimeError, AttributeError):
+            pass
 
     def maximize_animated(self):
         """Maximize with the growth Windows shows instead of an instant jump.
@@ -1460,9 +1623,11 @@ class MainWindow(QWidget):
             self._normal_geo = QRect(normal)
         screen = self.screen() or QApplication.primaryScreen()
         target = screen.availableGeometry() if screen else normal
-        # the frame and the margins of a maximized window are gone: take them off for the
-        # animation, so its last frame and the real maximized state look the same
-        self.layout().setContentsMargins(0, 0, 0, 0)
+        # The frame's margin is left alone until the state changes: taking it off here costs a
+        # relayout and a full repaint of the page before the first frame, which put a 30 ms wait
+        # between the click and any movement at all. It goes at the end instead, when the
+        # window state changes (see changeEvent), and the five pixels the content grows by are
+        # the animation's last step rather than a stall before its first.
 
         def done():
             self.setGeometry(target)
@@ -2521,16 +2686,17 @@ class MainWindow(QWidget):
         QTimer.singleShot(0, self._reposition_floating)
 
     def _flush_growth_strip(self, old, new):
-        """Paint the strip this growth just opened up in the same turn as the resize.
+        """Mark the strip this growth just opened up for painting, in the same turn as the resize.
 
-        Left to Qt's next paint, that strip is not the app's for a while: the compositor has
-        nothing of its own to put there and shows either what is behind the window or the window
-        class background brush (see wm.erase_colour for the colour of that one) — the pale stripes
-        along the right and bottom edge. How long the while is depends on the paint: the same
-        paint covers the whole page, thumbnails and all, and during a drag the system's modal
-        resize loop keeps Qt's queued paint out of the message queue for the whole drag. Painting
-        here — Qt paints what is dirty, which after a resize is the window — happens while the
-        resize is still being handled, so the strip is never left over to show anything."""
+        Left to the system, that strip is not the app's for a while: the compositor has nothing
+        of its own to put there and shows either what is behind the window or the window class
+        background brush (see wm.erase_colour for the colour of that one) — the pale stripes
+        along the right and bottom edge. Asking for the paint here — a moment before Qt's own
+        pass over the dirty region would have asked for it anyway — is what keeps the strip the
+        app's own colour in the meantime, and it costs one paint of the window instead of the two
+        a repaint() here plus the system's WM_PAINT would: measured on the real window, painting
+        the strip by hand cost 6-8 ms of every frame, and the paint that followed it cost as much
+        again for the same pixels."""
         if not old.isValid():
             return
         dw, dh = new.width() - old.width(), new.height() - old.height()
@@ -2544,7 +2710,7 @@ class MainWindow(QWidget):
         region = QRegion(rects.pop())
         for r in rects:
             region = region.united(r)
-        self.repaint(region)
+        self.update(region)
 
     def _shot_frame(self):
         """Diagnostic, off unless KONUS_ANIM_SHOTS=1: save what the screen shows of this window

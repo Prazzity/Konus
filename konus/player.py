@@ -130,7 +130,13 @@ class VideoFrame(Surface):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._mask()
+        # A window that is animating its own geometry resizes this child on every frame, and a
+        # mask costs a SetWindowRgn plus a WM_WINDOWPOSCHANGING/CHANGED pair and a full redraw of
+        # this child — on the way to it, the video area is painted black. Nine pixels of rounded
+        # corner are not worth a frame: the mask is put back when the animation ends (see
+        # MainWindow._after_geometry_animation).
+        if not getattr(self.window(), "_maximizing", lambda: False)():
+            self._mask()
 
     def set_radius(self, r):
         self.radius = r
