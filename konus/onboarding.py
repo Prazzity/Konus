@@ -326,8 +326,10 @@ class Onboarding(QDialog):
             default = self.store["video_folders"][0]
         self.folder = QLineEdit(default)
         self.folder.setFixedSize(470, 36)
-        self.folder.setStyleSheet(f"QLineEdit {{ background: {theme.hexc('field')}; border: 1px solid {theme.hexc('line')}; "
-                                  f"border-radius: 6px; padding: 0 12px; font-size: 16px; color: {theme.hexc('text_hi')}; }}")
+        theme.styled(self.folder, lambda: f"QLineEdit {{ background: {theme.hexc('field')}; "
+                                          f"border: 1px solid {theme.hexc('line')}; border-radius: 6px; "
+                                          f"padding: 0 12px; font-size: 16px; "
+                                          f"color: {theme.hexc('text_hi')}; }}")
         row.addWidget(self.folder)
         browse = SolidButton("Browse", "dark", width=114)
         browse.clicked.connect(self._browse)

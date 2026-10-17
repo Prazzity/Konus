@@ -185,8 +185,9 @@ class Field(QLineEdit):
         super().__init__(text)
         self.setPlaceholderText(tr(placeholder))
         self.setFixedHeight(height)
-        self.setStyleSheet(f"QLineEdit {{ background: {theme.hexc('field')}; border: 2px solid {theme.hexc('item')}; "
-                           f"border-radius: 6px; padding: 0 12px; }}")
+        theme.styled(self, lambda: f"QLineEdit {{ background: {theme.hexc('field')}; "
+                                   f"border: 2px solid {theme.hexc('item')}; border-radius: 6px; "
+                                   f"padding: 0 12px; }}")
 
 
 class ToolBox(QWidget):
@@ -813,8 +814,9 @@ class NetworkDialog(Dialog):
         self.urls = QPlainTextEdit()
         self.urls.setPlaceholderText(tr("e.g., https://www.example.com/stream.avi"))
         self.urls.setFixedHeight(194)
-        self.urls.setStyleSheet(f"QPlainTextEdit {{ background: {theme.hexc('field')}; border: 2px solid "
-                                f"{theme.hexc('item')}; border-radius: 6px; padding: 8px 12px; }}")
+        theme.styled(self.urls, lambda: f"QPlainTextEdit {{ background: {theme.hexc('field')}; "
+                                        f"border: 2px solid {theme.hexc('item')}; border-radius: 6px; "
+                                        f"padding: 8px 12px; }}")
         clip = QApplication.clipboard().text().strip()
         if re.match(r"^[a-z]+://\S+$", clip):
             self.urls.setPlainText(clip)

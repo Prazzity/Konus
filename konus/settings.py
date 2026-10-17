@@ -10,8 +10,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFontDatabase, QFontMetrics, QPainter
-from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout, QLineEdit, QScrollArea, QVBoxLayout,
-                             QWidget)
+from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                             QScrollArea, QVBoxLayout, QWidget)
 
 from . import icons, prefs, sysutil, theme
 from . import i18n
@@ -130,10 +130,14 @@ class EqWidget(QWidget):
             s.changed.connect(lambda val, i=i: self._set(i, val))
             col.addWidget(s, 0, Qt.AlignHCenter)
             col.addWidget(Label(name, 14, "text_2"), 0, Qt.AlignHCenter)
-            vl = Label(tr("{v} dB").format(v=f"{self.bands[i]:.1f}"), 12, "text")
+            vl = QLabel(tr("{v} dB").format(v=f"{self.bands[i]:.1f}"))
+            vl.setFont(theme.font(12, theme.MEDIUM))
             vl.setAlignment(Qt.AlignCenter)
             vl.setFixedSize(60, 30)
-            vl.setStyleSheet(f"background: {theme.hexc('field')}; border-radius: 4px; color: {theme.hexc('text')};")
+            # not a Label: one writes its own colour into a stylesheet of its own for every theme
+            # change, and the box belongs to the same widget (see theme.styled)
+            theme.styled(vl, lambda: f"background: {theme.hexc('field')}; border-radius: 4px; "
+                                     f"color: {theme.hexc('text')};")
             col.addWidget(vl, 0, Qt.AlignHCenter)
             row.addLayout(col)
             self.sliders.append(s)
@@ -221,8 +225,8 @@ class SettingsDialog(QDialog):
         self.search.setPlaceholderText(tr("Search"))
         self.search.setFixedSize(200, 34)          # the rail card's width: see _align_search
         self.search.addAction(icons.icon("search", 24), QLineEdit.LeadingPosition)
-        self.search.setStyleSheet(f"QLineEdit {{ background: {theme.hexc('field_2')}; border-radius: 6px; "
-                                  f"padding-left: 8px; }}")
+        theme.styled(self.search, lambda: f"QLineEdit {{ background: {theme.hexc('field_2')}; "
+                                          f"border-radius: 6px; padding-left: 8px; }}")
         self.search.textChanged.connect(self._search)
         hh.addWidget(self.search)
         hh.addSpacing(32)
@@ -645,7 +649,7 @@ class SettingsDialog(QDialog):
         if not found:
             lv.addWidget(Label("No extensions installed.", 14, "text_3"))
         lv.addStretch(1)
-        listing.setStyleSheet(f"background: {theme.hexc('field')}; border-radius: 6px;")
+        theme.styled(listing, lambda: f"background: {theme.hexc('field')}; border-radius: 6px;")
         v.addWidget(listing)
         row = QHBoxLayout()
         search = QLineEdit()

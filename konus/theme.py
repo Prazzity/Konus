@@ -197,6 +197,28 @@ def apply(mode=None, accent=None):
     T.changed.emit()
 
 
+def styled(widget, css):
+    """Give a widget a stylesheet of its own, written from the theme as it is then — and written
+    again for every theme change.
+
+    A rule written once with hexc() in it keeps the colours of the theme it was written in, and
+    nothing in the app re-writes it: the search box of the Settings dialog stayed dark under the
+    light theme it had just been switched to. `css` is called for the rule, so it reads the theme
+    each time. The keeper is a child of the widget it serves, so a dialog that is opened and closed
+    all day leaves nothing behind. Widgets that paint themselves (see konus.widgets) need none of
+    this — only stock ones, whose look is a stylesheet, do."""
+    class _Keeper(QObject):
+        def apply(self):
+            try:
+                widget.setStyleSheet(css())
+            except RuntimeError:               # gone with its dialog between two changes
+                pass
+
+    keeper = _Keeper(widget)                   # a child of the widget: it lives exactly as long
+    T.changed.connect(keeper.apply)
+    keeper.apply()
+
+
 # --- fonts ----------------------------------------------------------------
 _family = None
 
