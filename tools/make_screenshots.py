@@ -21,8 +21,9 @@ Two things are arranged first, because a screenshot should not show this machine
 The shots, and what each of them needs in `--media`:
 
 * `player`, `preset`, `library` — films, any folder of them;
-* `tracks` — a folder of *episodes* with a subfolder of their audio tracks ("RUS Sound" in the
-  wild), because that is what the matcher looks at;
+* `tracks` — a folder of *episodes* with its audio tracks in folders of their own ("RUS Sound",
+  one folder per dub in the wild), because that is what the matcher looks at — and the picture is
+  about several of them, so the dubs to show are the folders with tracks;
 * `subtitles` — a folder of episodes with `.srt` files beside them.
 """
 

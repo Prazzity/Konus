@@ -344,11 +344,14 @@ class PairRow(QWidget):
 
 
 class CheckRow(QWidget):
+    """A row with a tick on the right. `note` is a count or a state shown beside it ("3 tracks"),
+    in the dim colour and right-aligned, so a column of them lines up."""
+
     toggled = pyqtSignal(bool)
 
-    def __init__(self, text, checked=False, icon="file"):
+    def __init__(self, text, checked=False, icon="file", note=""):
         super().__init__()
-        self.text, self.checked, self.icon = text, checked, icon
+        self.text, self.checked, self.icon, self.note = text, checked, icon, note
         self.setFixedHeight(36)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -366,9 +369,16 @@ class CheckRow(QWidget):
             p.drawRoundedRect(QRectF(self.rect()), 6, 6)
         p.drawPixmap(10, 6, icons.pixmap(self.icon, 24))
         f = theme.font(14)
+        fm = QFontMetrics(f)
         p.setFont(f)
+        room = self.width() - 90
+        if self.note:
+            w = fm.horizontalAdvance(self.note)
+            p.setPen(c("text_2"))
+            p.drawText(QRectF(self.width() - 46 - w, 0, w, 36), Qt.AlignVCenter, self.note)
+            room = min(room, self.width() - w - 106)          # 46 left of the text, a gap, the note
         p.setPen(c("text_hi") if self.checked else c("text"))
-        p.drawText(QRectF(46, 0, self.width() - 90, 36), Qt.AlignVCenter, elide(self.text, f, self.width() - 90))
+        p.drawText(QRectF(46, 0, room, 36), Qt.AlignVCenter, elide(self.text, f, room))
         if self.checked:
             p.drawPixmap(self.width() - 34, 6, icons.pixmap("check", 24, None, "active"))
 
@@ -1549,10 +1559,12 @@ class AudioTracksDialog(Dialog):
     The tracks of a release live in folders of their own ("RUS Sound", and under it one folder
     per dub), so those folders are listed with their track counts and the user ticks the ones to
     take tracks from — that is what tells three identically named dubs apart, and the row shows
-    the folder its track came from. Opening the dialog again shows the folders the episodes'
-    tracks came from last time, so it opens on the user's own choice. The switch by the Add
-    button hands a track to the episode that is playing right now instead of waiting for it to
-    start again."""
+    the folder its track came from. Every ticked folder that has the episode's own track gives
+    it one, so ticking three dubs leaves three tracks on that episode: the row shows how many
+    there are, the first folder listed is the one that plays, and the others are a Sound menu
+    pick away while it runs. Opening the dialog again shows the folders the episodes' tracks came
+    from last time, so it opens on the user's own choice. The switch by the Add button hands the
+    tracks to the episode that is playing right now instead of waiting for it to start again."""
 
     def __init__(self, win, target_path=None, items=None):
         self.win = win
@@ -1588,7 +1600,7 @@ class AudioTracksDialog(Dialog):
         self.list_lay.setSpacing(4)
         self.body_lay.setContentsMargins(20, 10, 20, 0)
         self.body_lay.addWidget(scroll(self.list_host), 1)
-        self.rows = {}                  # video -> (CheckRow, track)
+        self.rows = {}                  # video -> (CheckRow, its tracks — the first one plays)
         self.picks = {}                 # video -> the tracks the matcher would not choose between
         self.chosen = {}                # video -> the track the user picked by hand
         self.skipped = set()            # videos the user left without a track
@@ -1662,6 +1674,11 @@ class AudioTracksDialog(Dialog):
                 row.setToolTip(folder)
                 row.toggled.connect(lambda on, f=folder: self._folder_toggled(f, on))
                 self.list_lay.addWidget(row)
+            # What the ticks add up to, said once here rather than in every row: the count
+            # beside an episode is this many tracks, and the menu is where the rest of them are.
+            self.list_lay.addWidget(Label(
+                "Every ticked folder gives each episode its own track — the first one plays, "
+                "the rest are under Audio → Audio Track.", 14, "text_3", wrap=True))
             self.list_lay.addSpacing(8)
         else:
             self.list_lay.addWidget(Label("No audio files in this folder.", 14, "text_3"))
@@ -1681,28 +1698,28 @@ class AudioTracksDialog(Dialog):
         return want
 
     def _episodes(self, videos):
-        """The episode rows, with the track each one gets: matched, left to the user to pick
-        (several tracks of the ticked folders look equally right), or none at all.
+        """The episode rows, with the tracks each one gets: matched — one per ticked folder, the
+        count shown on the row and the first of them the one that plays — left to the user to
+        pick (several tracks of the ticked folders look equally right), or none at all.
 
-        An episode that already has a track keeps it while its folder is one of the ticked ones —
-        the dialog opens on what the episodes use, so pressing Add again changes nothing. Untick
-        that folder and the episode is matched afresh, which is how a season moves to another
-        dub."""
+        An episode that already uses a track of a ticked folder keeps it in front: the dialog
+        opens on what the episodes use, so pressing Add again changes nothing. Untick that
+        folder and the episode is matched afresh, which is how a season moves to another dub."""
         tracks = self._tracks()
         pairs = dict(match_audio_tracks(videos, self._folders())) if tracks else {}
         for v in videos:
             cands = track_candidates(v, tracks)
             if v in self.skipped:
-                track = None
+                got = []
             elif v in self.chosen:
-                track = self.chosen[v]
+                got = [self.chosen[v]]
             else:
-                stored = (self.win.store.external_audio(v) or [None])[-1]
-                track = stored if stored in cands else pairs.get(v)
-            if track:
-                row = CheckRow(f"{os.path.basename(v)}   —   {self._track_name(track)}", True, icon="audio")
-                row.setToolTip(track)
-                self.rows[v] = (row, track)
+                got = self._episode_tracks(v, pairs.get(v) or [], cands)
+            if got:
+                row = CheckRow(f"{os.path.basename(v)}   —   {self._track_name(got[0])}", True,
+                               icon="audio", note=self._tracks_note(got))
+                row.setToolTip("\n".join(self._track_name(t) for t in got))
+                self.rows[v] = (row, got)
                 self.list_lay.addWidget(row)
                 continue
             if cands:
@@ -1717,6 +1734,23 @@ class AudioTracksDialog(Dialog):
             else:
                 self.list_lay.addWidget(Label(f"{os.path.basename(v)}   —   " + tr("no matching track found"),
                                               14, "text_3"))
+
+    def _episode_tracks(self, video, matched, cands):
+        """What this episode gets from the ticked folders: every track the matcher found, with
+        the one the episode already uses in front — that is the one that plays, and the others
+        are a Sound → Audio Track pick away. An episode whose tracks the matcher would not
+        choose between (none found, but the folders hold candidates) keeps what it has, so a
+        pick made by hand survives the next open."""
+        stored = [t for t in self.win.store.external_audio(video) if t in cands]
+        if not matched:
+            return stored
+        kept = [t for t in stored if t in matched]
+        return kept + [t for t in matched if t not in kept]
+
+    def _tracks_note(self, tracks):
+        """The count beside an episode that got more than one track — the folders it is ticked
+        for all had one for it, and the row says so instead of quietly showing the first."""
+        return trn("track", "tracks", len(tracks)) if len(tracks) > 1 else ""
 
     def _folder_name(self, folder):
         """A path the user knows from Explorer — "RUS Sound/AniLibria", or the folder being
@@ -1755,10 +1789,10 @@ class AudioTracksDialog(Dialog):
         store, engine = self.win.store, self.win.engine
         store.set("activate_matched_audio", self.activate.isChecked())
         saved, touched = 0, False
-        for video, (row, track) in self.rows.items():
+        for video, (row, tracks) in self.rows.items():
             # a file that disappeared between the scan and Add is not remembered as this
             # episode's track (the store filters those out on read, so it was a dead entry)
-            want = [track] if row.checked and os.path.exists(track) else []
+            want = [t for t in tracks if os.path.exists(t)] if row.checked else []
             saved += 1 if want else 0
             if store.external_audio(video) != want:
                 store.set_external_audio(video, want)
@@ -1770,7 +1804,7 @@ class AudioTracksDialog(Dialog):
         self.win.notify(trn("audio track remembered", "audio tracks remembered", saved) if saved
                         else tr("Added audio tracks cleared"))
         if touched and self.activate.isChecked() and engine.is_active():
-            # The episode playing right now: its new track takes over at once (the others get
+            # The episode playing right now: its new tracks take over at once (the others get
             # theirs when they start, see engine._start_item)
             if store.external_audio(engine.current):
                 engine.start_external_audio()

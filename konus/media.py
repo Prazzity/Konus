@@ -719,10 +719,22 @@ def track_candidates(video, tracks):
 
 
 def match_audio_tracks(videos, folders):
-    """[(video, track)]: the audio file from `folders` that belongs to each video.
+    """[(video, [tracks])]: the audio files from `folders` that belong to each video — what
+    every ticked folder has for it, the closest names first (and after them the folder listed
+    first).
 
-    Exactly the folders in the list are scanned — the callers hand over the ones they mean (the
-    dialog, the ones the user ticked: see track_folders)."""
+    A release keeps the sound of one episode in as many folders as it ships dubs, and the ticks
+    say which of them to take it from: one ticked folder is one track per episode, three ticked
+    folders are three, and the leading one is the one that plays (the others wait in the Audio
+    Track menu — see engine.audio_tracks). A folder can also hold one episode's audio more than
+    once — the same episode in two languages, named alike — and then all of them are its, the
+    count on the row says how many. Only the folders in the list are scanned: the callers hand
+    over the ones they mean (the dialog, the ones the user ticked: see track_folders).
+
+    A folder whose *only* claim on an episode is its number offers it nothing when two files
+    claim the same number: that is a folder holding two series that both have an "05", and a
+    wrong pair is worse than a row left for the user to answer (what it had to offer is in
+    track_candidates, and the dialog asks)."""
     tracks = []
     position = {}                            # track -> where its folder sits in the list
     for i, folder in enumerate(folders):
@@ -739,24 +751,27 @@ def match_audio_tracks(videos, folders):
     out = []
     for video in videos:
         vkey = name_key(video)
-        # Score every candidate, take the best, and pair nothing when two look equally right:
-        # a file's own episode number is a strong hint, but a folder can hold two series that
-        # both have an "05", and a wrong pair is worse than none. Two equal tracks of *one*
-        # folder are such a tie; two equal tracks of different folders are the user's own list
-        # deciding (the dialog shows it, and each row names the folder its track came from).
-        best, best_score, best_folder, tie = None, 0, None, False
+        # What each folder has for this episode: its best-scoring names, and nothing at all
+        # from a folder whose only claim is a number shared by two of its files.
+        best = {}                            # folder -> [score, [tracks]]
         for track, tkey in keys:
             if track in used or not same_episode(vkey, tkey):
                 continue
             score = _fit_score(vkey, tkey)
             folder = position[track]
-            if score > best_score or (score == best_score and best is not None and folder < best_folder):
-                best, best_score, best_folder, tie = track, score, folder, False
-            elif score == best_score and folder == best_folder:
-                tie = True
-        if best is not None and not tie:
-            used.add(best)
-            out.append((video, best))
+            was = best.get(folder)
+            if was is None or score > was[0]:
+                best[folder] = [score, [track]]
+            elif score == was[0]:
+                was[1].append(track)
+        got = []
+        for folder, (score, found) in sorted(best.items(), key=lambda f: (-f[1][0], f[0])):
+            if score == 1 and len(found) > 1:
+                continue                     # two files that only share the number: no decision
+            got += found
+        if got:
+            used.update(got)
+            out.append((video, got))
     return out
 
 

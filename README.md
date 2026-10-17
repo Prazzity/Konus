@@ -40,11 +40,13 @@ the episodes they belong to. And every episode needs the same picture and sound 
 
 **Match tracks to the folder.** Sound → *Match tracks to the folder…* reads the folder — and its subfolders,
 however deep the release buries them — and pairs each episode with its own audio track by episode number and name.
-The folders the tracks were found in are listed at the top, each with its track count: the ticks say which ones to
-take tracks from, so when a release ships two or three dubs whose files are named identically, the folder you tick
-is the one you get. Every row shows the track that episode got and the folder it came from. The *Activate the track*
-switch beside Add (on by default) gives the matched track to the episode that is playing right now; the rest pick
-theirs up when they start, as does an episode you copy into that folder later.
+The folders the tracks were found in are listed at the top, each with its track count, and the ticks say which of
+them to take tracks from: tick one dub folder and every episode gets that dub, tick all of them and every episode
+gets all of them. Each row shows the track that episode plays and, beside it, how many tracks were matched to it —
+a release that ships three dubs for the season leaves three on every episode, and *Sound → Audio Track* switches
+between them while it plays, without losing the place. The *Activate the track* switch beside Add (on by default)
+gives the matched tracks to the episode that is playing right now; the rest pick theirs up when they start, as does
+an episode you copy into that folder later.
 
 ![Matching audio tracks to the episodes of a folder](screenshots/tracks.jpg)
 

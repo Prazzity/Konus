@@ -1,6 +1,6 @@
 ; Inno Setup script for the Konus installer.
 ;
-;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=0.4.4 packaging\konus.iss
+;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=0.4.6 packaging\konus.iss
 ;
 ; `tools/build_installer.py` builds the application with PyInstaller first and passes the
 ; version, so nobody has to type it here. What it makes is a per-user install by default

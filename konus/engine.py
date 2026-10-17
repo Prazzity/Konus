@@ -719,6 +719,7 @@ class Engine(QObject):
         self._hold = None                   # {"audio", "video", "spu", "until"}: keep after a rebuild
         self._ext_mp = None                  # second player: the file's external audio track
         self._ext_file = None                # the file it plays (None = it is off)
+        self._ext_item = None                # the item that file belongs to
         self._ext_played = False             # that player has produced sound for this file
         self._ext_own_track = None           # the file's own track it replaced
         self._mp_new = False                 # a media has just been built (see _poll)
@@ -1536,33 +1537,52 @@ class Engine(QObject):
                 diag.log("ext_audio", event="rate-failed", rate=rate)
 
     def audio_tracks(self):
-        """The file's own tracks plus the external one it remembers, if there is one. The
-        external entry stays in the list even while the file's own track is the one playing,
-        so it can be picked again (before, it vanished and there was no way back)."""
+        """The file's own tracks plus every audio file it remembers, in play order. The added
+        entries stay in the list even while the file's own track is the one playing, so one can
+        be picked again (before, it vanished and there was no way back) — and an episode matched
+        to three dubs has all three here to switch between while it plays."""
         tracks = [(i, _dec(n)) for i, n in (self.mp.audio_get_track_description() or [])]
-        external = self._external_file()
-        if external:
-            tracks = list(tracks)
-            tracks.append((self.EXT_TRACK, os.path.basename(external)))
+        for i, path in enumerate(self._added_tracks(self.current)):
+            tracks.append((self.EXT_TRACK - i, self._added_name(path)))
         return tracks
 
-    def _external_file(self):
-        """The remembered external audio file of the current item, if it still exists."""
-        if self.external_audio_on():
-            return self._ext_file
-        if not self.current or is_url(self.current):
-            return None
-        for path in self.store.external_audio(self.current):
-            if os.path.exists(path):
-                return path
-        return None
+    def _added_tracks(self, item):
+        """The audio files added to this item that are still there, in play order: the first is
+        the one that plays when it starts (see _start_external_player)."""
+        if not item or is_url(item):
+            return []
+        return [p for p in self.store.external_audio(item) if os.path.exists(p)]
+
+    def _added_name(self, path, folder=False):
+        """An added track's name as the user knows it: where it sits in the release
+        ("RUS Sound/AniLibria/01.mka") when it is under the video's own folder, else the file
+        name. Three dubs of one episode are three files of the same name, and the menu has to
+        say which is which. With `folder`, the name is the folder it came from instead
+        ("RUS Sound/AniLibria") — what tells the dubs apart in the OSD, which has no room for
+        a path: a full one runs the width of the window."""
+        item = self.current
+        if item and not is_url(item):
+            try:
+                rel = os.path.relpath(path, os.path.dirname(item))
+            except ValueError:                 # another drive: nothing to be relative to
+                rel = path
+            if not rel.startswith(".."):
+                head = os.path.dirname(rel)
+                return head if (folder and head) else rel
+        return os.path.basename(path)
 
     def audio_track(self):
-        return self.EXT_TRACK if self.external_audio_on() else self.mp.audio_get_track()
+        """The id the Sound menu shows as playing: the added track's own while one of them
+        plays, the file's own track otherwise."""
+        if self.external_audio_on():
+            files = self._added_tracks(self.current)
+            i = files.index(self._ext_file) if self._ext_file in files else 0
+            return self.EXT_TRACK - i
+        return self.mp.audio_get_track()
 
     def set_audio_track(self, tid):
-        if tid == self.EXT_TRACK:
-            self.start_external_audio()
+        if tid is not None and tid <= self.EXT_TRACK:     # one of the added audio files
+            self.start_external_audio(index=self.EXT_TRACK - tid)
             return
         if self.external_audio_on():
             self.stop_external_audio(restore=False)   # a built-in track was picked instead
@@ -1691,14 +1711,15 @@ class Engine(QObject):
             return None, None, None  # nothing chosen yet (-1 would mean "off"); let libVLC pick
         return self.mp.audio_get_track(), self.mp.video_get_track(), self.spu()
 
-    EXT_TRACK = -2                           # the id the menus use for the external track
+    EXT_TRACK = -2                           # the first added track in the menus (−3, −4 … follow)
     EXT_SYNC_LIMIT = 1000                    # ms: only a real divergence is corrected
 
     def external_audio_on(self):
         return self._ext_mp is not None and self._ext_file is not None
 
-    def start_external_audio(self, item=None):
-        """Play the file's remembered external audio track in a player of its own.
+    def start_external_audio(self, item=None, index=0):
+        """Play an audio file the item remembers in a player of its own — `index` into the list
+        (0, the track the item plays by default; the Sound menu hands over the others).
 
         libVLC 3's slave mechanism cannot be used for this: with the slave *selected* every
         seek on a large MKV ends with the position at 0 — the picture freezes and the sound
@@ -1706,22 +1727,32 @@ class Engine(QObject):
         keeps seeking but never lists the track). A second player on the same instance is kept
         in step by _sync_external_audio and seeks like any other input."""
         item = item or self.current
+        files = self._added_tracks(item)
+        want = files[index] if 0 <= index < len(files) else (files[0] if files else None)
+        if (want is not None and item == self._ext_item and self._ext_mp is not None
+                and not self._mp_new                      # a fresh start is never the same run
+                and os.path.normcase(want) == os.path.normcase(self._ext_file or "")):
+            # The track that should play is the one playing already: restarting it for a list
+            # that only grew (pressing Add twice, adding a third dub) would be a gap in the
+            # sound for nothing.
+            self.tracksChanged.emit()
+            return True
         try:
-            return self._start_external_player(item)
+            return self._start_external_player(item, index)
         except Exception as exc:                       # never let a slot kill the process
             diag.log("ext_audio", event="failed", error=f"{type(exc).__name__}: {exc}")
             self.message.emit(tr("Couldn't load that audio file"), "")
             return False
 
-    def _start_external_player(self, item):
+    def _start_external_player(self, item, index=0):
         self.stop_external_audio()
         self._ext_played = False             # "ran out" is judged per attach, not per session
         if not item or is_url(item):
             return False
-        files = [p for p in self.store.external_audio(item) if os.path.exists(p)]
+        files = self._added_tracks(item)
         if not files:
             return False
-        path = str(files[-1])
+        path = str(files[index] if 0 <= index < len(files) else files[0])
         if self._ext_mp is None:
             if self.instance is None:
                 return False
@@ -1742,6 +1773,8 @@ class Engine(QObject):
         media.release()
         self._ext_own_track = self.mp.audio_get_track()   # to go back to when it stops
         self._ext_file = path
+        self._ext_item = item                # the id the Sound menu shows, and what "already
+                                             # playing this one" is judged against
         self._ext_mp.audio_set_volume(self._volume)
         self._ext_mp.audio_set_mute(self._muted)
         self._ext_mp.play()
@@ -1756,7 +1789,7 @@ class Engine(QObject):
         self._ext_delay()
         self.mp.audio_set_track(-1)          # the video's own sound stays off while this plays
         self._apply_mute()
-        self.message.emit(tr("Audio track: {name}").format(name=os.path.basename(path)), "")
+        self.message.emit(tr("Audio track: {name}").format(name=self._added_name(path, folder=True)), "")
         self.tracksChanged.emit()
         return True
 
@@ -1792,12 +1825,13 @@ class Engine(QObject):
             # audio_set_track(0) and the file stayed silent after "forget the added tracks"
             self.mp.audio_set_track(self._own_audio_track())
         self._ext_file = None
+        self._ext_item = None
         self._apply_mute()
 
     def _own_audio_track(self):
         """The file's own track to go back to: the one that was playing before the external
         track took over, else the first real one, else "auto"."""
-        if self._ext_own_track not in (None, -1, self.EXT_TRACK):
+        if self._ext_own_track is not None and self._ext_own_track >= 0:
             return self._ext_own_track
         real = [i for i, _ in (self.mp.audio_get_track_description() or []) if i != -1]
         return real[0] if real else 0
@@ -2105,11 +2139,14 @@ class Engine(QObject):
 
     def add_audio_file(self, path, remember=True):
         """Use an external file as this item's audio: remembered, then played by the second
-        player — a libVLC slave would break seeking (see start_external_audio)."""
+        player — a libVLC slave would break seeking (see start_external_audio).
+
+        A file added by hand goes in front of the ones the matcher found, so it is the one that
+        plays; the others stay in the Sound menu."""
         if not self.current:
             return False
         if remember and not is_url(self.current):
-            self.store.set_external_audio(self.current, [path])   # one track per item
+            self.store.add_external_audio(self.current, path)
         ok = self.start_external_audio()
         if not ok:
             self.message.emit(tr("Couldn't load that audio file"), "")

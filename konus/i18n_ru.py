@@ -1604,6 +1604,9 @@ TABLE = {
     "no matching track found": "подходящая дорожка не найдена",
     "Folders with tracks": "Папки с дорожками",
     "No audio files in this folder.": "В этой папке нет аудиофайлов.",
+    "Every ticked folder gives each episode its own track — the first one plays, the rest are "
+    "under Audio → Audio Track.": "Каждая отмеченная папка даёт каждой серии свою дорожку — "
+                                  "играет первая, остальные в «Звук → Аудиодорожка».",
     "This folder": "Эта папка",
     "Activate the track": "Активировать дорожку",
     "Give the matched track to the episode playing right now, instead of applying it when that "

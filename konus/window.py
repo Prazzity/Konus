@@ -2035,7 +2035,8 @@ class MainWindow(QWidget):
         elif self.engine.current and not is_url(self.engine.current):
             # Adding to the file that is playing: remember it and hand it to the second player
             # (see engine.start_external_audio) — the picture and the seeking stay untouched.
-            self.store.set_external_audio(self.engine.current, [f])
+            # In front of the tracks it already has: the one just chosen is the one to hear.
+            self.store.add_external_audio(self.engine.current, f)
             self.engine.start_external_audio()
         else:
             self.engine.add_audio_file(f)          # streams: the only way libVLC offers
@@ -2409,8 +2410,8 @@ class MainWindow(QWidget):
                      on_done=lambda pairs: self._matched_audio(pairs, len(want)))
 
     def _matched_audio(self, pairs, looked):
-        for video, track in pairs or []:
-            self.store.set_external_audio(video, [track])
+        for video, tracks in pairs or []:
+            self.store.set_external_audio(video, tracks)
         if pairs and self.engine.current in [v for v, _ in pairs]:
             self.engine.start_external_audio()     # the playing item switched to its new track
         n = len(pairs or [])

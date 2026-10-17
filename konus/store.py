@@ -916,10 +916,14 @@ class Store(QObject):
         return [a for a in self.data["external_audio"].get(path, []) if os.path.exists(a)]
 
     def add_external_audio(self, path, track):
+        """Remember a track for this file. It goes in front of the ones already remembered, with
+        no duplicate: a track added by hand is the one that should play (the engine takes the
+        first of the list), while the matched ones keep it company in the Sound menu."""
         lst = self.data["external_audio"].setdefault(path, [])
-        if track not in lst:
-            lst.append(track)
-            self.save_later()
+        if track in lst:
+            lst.remove(track)
+        lst.insert(0, track)
+        self.save_later()
 
     def set_external_audio(self, path, tracks):
         if tracks:
