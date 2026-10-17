@@ -73,6 +73,21 @@ ELEMENTS = {
     "playlists": ("Playlists", "playlist", "extra"),
 }
 
+# What an element acts on: the item playing now ("item") or the queue ("queue"). An element that is
+# not named here acts on the window or on the library — the way out, the way in, the panels of the
+# library — and is always live. The ones named go dead while there is nothing to act on: with no
+# item open, the seek bar, the volume and the track buttons did to a film that was not open what
+# they do to one that is (see MainWindow._update_element_states).
+NEEDS = {
+    "current_time": "item", "seek": "item", "duration": "item", "volume": "item",
+    "audio": "item", "subtitles": "item", "settings": "item", "properties": "item",
+    "chapters": "item", "favorite": "item", "bookmark": "item", "bookmarks": "item",
+    "speed": "item", "stop": "item", "replay": "item", "record": "item", "snapshot": "item",
+    "pip": "item", "hdr": "item", "zoom": "item",
+    "fwd10": "item", "back10": "item", "fwd15": "item", "back15": "item",
+    "prev": "queue", "play": "queue", "next": "queue", "repeat": "queue", "shuffle": "queue",
+}
+
 # Order of the extra elements in the Customize Player dialog (as in the design).
 CUSTOMIZE_ORDER = ["spacer", "divider", "speed", "fwd10", "back10", "fwd15", "back15", "stop", "repeat", "shuffle",
                    "record", "snapshot", "pip", "hdr", "zoom", "right_sidebar", "quit", "vlc_settings", "go_home",
@@ -227,6 +242,8 @@ class SpeedElement(QWidget, Customizable):
 
     def paintEvent(self, e):
         p = QPainter(self)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         p.drawPixmap(0, 2, icons.pixmap("speed", 24, theme.accent_text("bar") if abs(self.rate - 1) > 0.01 else None))
         p.setFont(theme.font(13))
         p.setPen(c("icon"))
@@ -475,6 +492,8 @@ class NudgeButton(QWidget):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         p.setPen(Qt.NoPen)
         p.setBrush(c("accent") if self.underMouse() else c("accent_2"))
         p.drawRoundedRect(QRectF(self.rect()), 3, 3)

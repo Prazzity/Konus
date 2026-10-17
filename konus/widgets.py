@@ -198,6 +198,8 @@ class PlayButton(QAbstractButton, Customizable):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         bg = QColor("#6b6b6b") if self.playing else c("accent")
         if self._hover:
             bg = bg.lighter(112)
@@ -341,6 +343,8 @@ class TimeLabel(QWidget, Customizable):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         if (self._hover or self.edit.isVisible()) and not self.customizing:
             p.setPen(Qt.NoPen)
             p.setBrush(c("field"))
@@ -438,6 +442,8 @@ class SeekBar(QWidget, Customizable):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         r = QRectF(self.rect())
         p.setPen(Qt.NoPen)
         p.setBrush(c("field"))
@@ -639,6 +645,8 @@ class ConeVolume(QWidget, Customizable):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         r = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
         shape = self._shape(r)
         p.setPen(QPen(c("field"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))

@@ -105,6 +105,11 @@ class Controller(QObject):
                 for ch in w.findChildren(QWidget):
                     ch.installEventFilter(self)
                 w.update()
+        # The elements are the window's own, and the state of the player is applied to them as it
+        # changes: marked as the dialog's *before* that happens, or a layout could not be arranged
+        # with nothing playing — every element of it would be dead under the pointer
+        # (see MainWindow._update_element_states).
+        self.win._sync_all()
         for w in self.win.player.bar.widgets:
             if getattr(w, "element_id", "") == "__newrow__" or w.element_id not in ELEMENTS:
                 pass

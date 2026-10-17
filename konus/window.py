@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialo
 from . import APP_NAME, diag, i18n, icons, prefs, sysutil, tasks, theme, wm
 from .actions import ACTION, ACTIONS, WINDOW_WIDE
 from .i18n import tr, trn
-from .controls import SeekPreview, TitleBar
+from .controls import NEEDS, SeekPreview, TitleBar
 from .dialogs import (AboutDialog, AddSubtitlesDialog, CaptureDialog, ConvertDialog, DiscDialog, MessageDialog,
                       NetworkDialog, PlaylistDialog, PropertiesDialog, ShortcutsDialog, StreamDialog)
 from .engine import (AUDIO_EXT, MEDIA_EXT, PLAYLIST_EXT, SUB_EXT, VIDEO_EXT, display_name, ext, fmt_time, is_audio,
@@ -532,6 +532,25 @@ class MainWindow(QWidget):
         t, length = e.time()
         self._update_time(t, length)
         self._update_title()
+        self._update_element_states()
+
+    def _update_element_states(self):
+        """Put the elements that act on what is playing out of reach while there is nothing to act
+        on (see controls.NEEDS).
+
+        With no item open the bars are still there — in fullscreen they are both the way out and
+        the way in — and every control on them used to work: the seek bar scrubbed, the volume and
+        the track buttons did what they do to a film that was not open. The item asked about is the
+        one that is *loaded*, not the one that is playing: a stopped film can still be seeked (the
+        engine restarts it there) and a paused one has to be."""
+        e = self.engine
+        alive = {"item": e.current is not None, "queue": bool(e.items)}
+        for eid, need in NEEDS.items():
+            for w in self._elements(eid):
+                # The Customize dialog builds these same bars and marks their elements as its own
+                # (see konus.customize): they are dragged there, not used, and nothing is playing
+                # while the layout is being arranged, so they would be dead under the pointer.
+                w.setEnabled(True if getattr(w, "customizing", False) else alive[need])
 
     def _update_time(self, t, length):
         for w in self._elements("current_time"):
@@ -1041,9 +1060,15 @@ class MainWindow(QWidget):
         self._layout_bars_visibility()
         self._sync_all()
 
-    def exit_fullscreen(self):
+    def exit_fullscreen(self, back_to_maximized=True):
+        """Leave fullscreen.
+
+        `back_to_maximized` is the state the window comes back to when it was maximized before
+        going fullscreen — what Esc and F do. A title-bar drag passes False: the drag takes the
+        window out of the maximized state as well, so that the size it is put at is the size it
+        keeps (see _leave_fullscreen_for_drag)."""
         self._show_cursor()
-        if self._was_max:
+        if self._was_max and back_to_maximized:
             self.showMaximized()
         else:
             self.showNormal()
@@ -1689,19 +1714,25 @@ class MainWindow(QWidget):
         wm.start(self, snap=True)          # a drag to the top edge maximizes (see wm.snap_to_top)
 
     def _leave_fullscreen_for_drag(self):
-        """Come out of fullscreen for a drag: the window takes the size it had before (or the
-        screen's usable area when there is none), placed so the pointer stays on the bar."""
+        """Come out of fullscreen for a drag: the window takes the size it had before it went
+        fullscreen (or, when that cannot be the size of a window, the size the maximize button
+        restores to), placed so the pointer stays on the bar."""
         cursor = QCursor.pos()
         screen = self.screen() or QApplication.primaryScreen()
-        # the size the window had when it went fullscreen: Qt's own "normal" geometry inside
-        # fullscreen is the fullscreen rectangle, and the stored one may be from an older session
-        target = QRect(self._fullscreen_from)
-        if target.isEmpty() or target.width() < 480 or target.height() < 320:
-            target = QRect(self._normal_target())
-        if target.isEmpty() or target.width() < 480 or target.height() < 320:
+        # The size the window had when it went fullscreen — unless that cannot be the size of a
+        # window (see _usable_normal): a window that was maximized (or filled to the screen by
+        # hand) went fullscreen *at the size of the screen*, and coming back to that is a
+        # screen-sized window that is not maximized — nothing has shrunk, and the maximize button
+        # has nothing to go back to. That size is the one the maximize button itself restores to,
+        # so the drag comes back to it (see _normal_target).
+        target = (QRect(self._fullscreen_from) if self._usable_normal(self._fullscreen_from)
+                  else QRect(self._normal_target()))
+        if target.isEmpty():
             target = QRect(screen.availableGeometry()) if screen else QRect(self.geometry())
         self._show_cursor()
-        self.exit_fullscreen()
+        # not back_to_maximized: dragging takes a window out of the maximized state, and a window
+        # put back at its normal size while the state still says maximized would keep neither
+        self.exit_fullscreen(back_to_maximized=False)
         g = QRect(target)
         g.moveLeft(int(cursor.x() - min(target.width() // 2, 220)))
         g.moveTop(max(0, int(cursor.y() - min(22, g.height() // 12))))
