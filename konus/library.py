@@ -1047,18 +1047,25 @@ class Library(QObject):
         return len([e for e in entries if e["kind"] not in ("add", "header", "empty")])
 
     def show_folder(self, path):
-        """Open the library at the folder of a file (title-bar folder chip)."""
+        """Open the library at the folder of a file (title-bar folder chip).
+        Returns the location it went to, so the chip can tell whether the sidebar is
+        already showing that folder."""
         folder = path if os.path.isdir(path) else os.path.dirname(path)
+        loc = None
         for root in self.store["video_folders"]:
             if folder == root or folder.startswith(root + os.sep):
-                self.navigate(("videos", folder))
-                return
-        for root in self.store["music_folders"]:
-            if folder == root or folder.startswith(root + os.sep):
-                self.navigate(("music", "songs", folder))
-                return
-        # not in the library yet: show it anyway under Videos
-        self.navigate(("videos", folder))
+                loc = ("videos", folder)
+                break
+        if loc is None:
+            for root in self.store["music_folders"]:
+                if folder == root or folder.startswith(root + os.sep):
+                    loc = ("music", "songs", folder)
+                    break
+        if loc is None:
+            # not in the library yet: show it anyway under Videos
+            loc = ("videos", folder)
+        self.navigate(loc)
+        return loc
 
     # --- actions -----------------------------------------------------------------
     def activate(self, entry, view=None):

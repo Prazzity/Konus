@@ -882,14 +882,22 @@ class MainWindow(QWidget):
 
     def open_current_folder(self):
         cur = self.engine.current
+        before = self.library.loc
         if cur and not is_url(cur):
-            self.library.show_folder(cur)
+            target = self.library.show_folder(cur)
         elif cur:
-            self.library.navigate(("network",))
+            target = ("network",)
+            self.library.navigate(target)
         else:
-            self.library.navigate(("videos",))
-        if self.mode == "player" and not self.sidebar_open:
-            self.toggle_sidebar()
+            target = ("videos",)
+            self.library.navigate(target)
+        # The chip is the sidebar's own switch: clicking it again while the sidebar already
+        # shows this folder closes it, instead of only ever opening it.
+        if self.mode == "player":
+            if self.sidebar_open and before == target:
+                self.toggle_sidebar()
+            elif not self.sidebar_open:
+                self.toggle_sidebar()
 
     def _layout_bars_visibility(self):
         """Windowed bars vs overlay bars, depending on fullscreen / hide UI / auto-hide."""
