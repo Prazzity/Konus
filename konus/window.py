@@ -2856,6 +2856,12 @@ class MainWindow(QWidget):
             return True
         if ev.type() in (QEvent.MouseButtonPress, QEvent.Wheel, QEvent.KeyPress):
             self.hint.hide_soon()
+            # The mouse's side buttons walk the file browser's history, as they walk
+            # Explorer's: back and forward, wherever the pointer is on it.
+            if ev.type() == QEvent.MouseButtonPress and ev.button() in (Qt.BackButton, Qt.ForwardButton):
+                if self._browser_on_screen(obj):
+                    self.library.back() if ev.button() == Qt.BackButton else self.library.forward()
+                    return True
         elif ev.type() == QEvent.Leave:
             self._hint_may_leave(obj)
         # Every window the app puts on screen gets the app's colour as its class background
@@ -2872,6 +2878,19 @@ class MainWindow(QWidget):
             self._edge_cursor = False
             self.unsetCursor()
         return False
+
+    def _browser_on_screen(self, obj):
+        """Whether a mouse event under `obj` belongs to the file browser that is on screen —
+        the full library page or the sidebar beside the video — rather than to a dialog, a
+        panel or a popup opened above it."""
+        if not isinstance(obj, QWidget):
+            return False
+        win = obj.window()
+        if win is self.compact:
+            return self.compact.isVisible()
+        if win is not self:
+            return False
+        return self.mode == "library" or self.compact.isVisible()
 
     def _hint_may_leave(self, obj):
         """The hint card is put up under the pointer, so the surface that was being hovered

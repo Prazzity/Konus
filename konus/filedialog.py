@@ -6,11 +6,35 @@ filter shows only its name ("Media") and the combos stop growing with their cont
 Same call signatures as QFileDialog's static helpers.
 """
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication, QComboBox, QFileDialog
+from PyQt5.QtCore import QEvent, QObject, Qt, QTimer
+from PyQt5.QtWidgets import QApplication, QComboBox, QFileDialog, QToolButton, QWidget
 
 from . import sysutil, theme
 from .i18n import tr
+
+
+class _SideButtons(QObject):
+    """Send the mouse's back/forward buttons to the dialog's own history buttons.
+
+    The shell's dialog does this itself, but Qt's own one — the one used when "Show the file
+    browser inside the open dialog" is on — only binds them to the two toolbar buttons. The
+    filter is installed on the application because the press lands on whichever child the
+    pointer is over: the file list, the places sidebar, the path field."""
+
+    def __init__(self, dlg):
+        super().__init__(dlg)
+        self.dlg = dlg
+
+    def eventFilter(self, obj, ev):
+        if (ev.type() == QEvent.MouseButtonPress
+                and ev.button() in (Qt.BackButton, Qt.ForwardButton)
+                and isinstance(obj, QWidget) and obj.window() is self.dlg):
+            name = "backButton" if ev.button() == Qt.BackButton else "forwardButton"
+            btn = self.dlg.findChild(QToolButton, name)
+            if btn is not None:
+                btn.click()
+            return True
+        return False
 
 
 def _run(parent, caption, directory, file_filter, mode, options):
@@ -59,7 +83,17 @@ def _run(parent, caption, directory, file_filter, mode, options):
     sysutil.dark_title_bar(dlg, dark)
     for delay in (60, 250, 900):
         QTimer.singleShot(delay, lambda d=dlg, k=dark: sysutil.dark_title_bar(d, k))
-    if dlg.exec_() != QFileDialog.Accepted:
+    # The shell's own dialog already handles the side buttons; Qt's widget dialog does not.
+    side = _SideButtons(dlg) if dlg.testOption(QFileDialog.DontUseNativeDialog) else None
+    app = QApplication.instance()
+    if side is not None:
+        app.installEventFilter(side)
+    try:
+        accepted = dlg.exec_() == QFileDialog.Accepted
+    finally:
+        if side is not None:
+            app.removeEventFilter(side)
+    if not accepted:
         return []
     return dlg.selectedFiles()
 
