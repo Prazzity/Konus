@@ -326,6 +326,9 @@ class MainWindow(QWidget):
         self.compact.setParent(self, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.compact.setAttribute(Qt.WA_TranslucentBackground)
         self.compact.hide()
+        # Translucent windows are skipped by the Show handler below, but a resize can expose
+        # a strip before the first paint: give its class the app's background colour too.
+        wm.erase_colour(self.compact, c("base"))
         self.sidebar_open = False
         self.player = PlayerArea(self)
         ph.addWidget(self.player, 1)
@@ -892,9 +895,17 @@ class MainWindow(QWidget):
         self._sync_all()
 
     def _sync_compact(self):
-        show = (self.sidebar_open and self.mode == "player" and not self.isFullScreen() and self.isVisible()
+        show = (self.sidebar_open and self.mode == "player" and self.isVisible()
                 and not self.isMinimized() and self.pip is None)
+        # A tool window can sit above a fullscreen window only while it is on top; without the
+        # flag the sidebar is simply not seen once the player fills the screen.
+        top = bool(self.compact.windowFlags() & Qt.WindowStaysOnTopHint)
+        if top != self.isFullScreen():
+            flags = self.compact.windowFlags()
+            self.compact.setWindowFlags((flags | Qt.WindowStaysOnTopHint) if self.isFullScreen()
+                                        else (flags & ~Qt.WindowStaysOnTopHint))
         if show:
+            self._show_cursor()
             self._place_compact()
             if not self.compact.isVisible():
                 self.compact.show()
@@ -902,11 +913,49 @@ class MainWindow(QWidget):
         elif self.compact.isVisible():
             self.compact.hide()
 
+    def _bar_insets(self, reserve=False):
+        """(top, bottom) the control bars take from a floating window.
+
+        Windowed, the title bar is above the player page and the control bar below it, so the
+        page itself already keeps them clear. In the overlay modes the same bars float over
+        the video — and fill the screen in fullscreen. The left sidebar follows the *visible*
+        bars, so it grows into their place when they hide; the right panels keep the bars'
+        room all the time (`reserve`): resizing one of those while a bar went away painted a
+        strip at its edge for a moment."""
+        if not self.overlay_mode():
+            return 0, 0
+        if self.isFullScreen() and not self.store.get("fs_controls"):
+            return 0, 0
+        if reserve and not self._fs_bars:
+            self._ensure_overlays()
+        top_bar = self._fs_bars.get("top")
+        bottom_bar = self._fs_bars.get("bottom")
+        if reserve:
+            top = top_bar.bar.height() if top_bar is not None else 40
+            bottom = bottom_bar.bar.height() if bottom_bar is not None else 54
+        else:
+            top = top_bar.bar.height() if top_bar is not None and top_bar.isVisible() else 0
+            bottom = bottom_bar.bar.height() if bottom_bar is not None and bottom_bar.isVisible() else 0
+        return top, bottom
+
     def _place_compact(self):
         page = self.player_page
         top_left = page.mapToGlobal(QPoint(0, 0))
-        h = page.height() - (self.player.bar.height() if self.player.bar.isVisible() else 0)
-        self.compact.setGeometry(top_left.x(), top_left.y(), self.compact.width(), max(200, h))
+        top_inset, bottom_inset = self._bar_insets()
+        if top_inset or bottom_inset:
+            y = top_left.y() + top_inset
+            h = page.height() - top_inset - bottom_inset
+        else:
+            y = top_left.y()
+            h = page.height() - (self.player.bar.height() if self.player.bar.isVisible() else 0)
+        self.compact.setGeometry(top_left.x(), y, self.compact.width(), max(200, h))
+        # A resize exposes the new bottom strip before the list and its scrollbar repaint.
+        # Lay them out and paint them in this frame, so the strip never shows on its own.
+        self.compact.layout().activate()
+        self.compact.repaint()
+        self.compact.rail.repaint()
+        self.compact.list.viewport().repaint()
+        self.compact.list.verticalScrollBar().repaint()
 
     def open_current_folder(self):
         cur = self.engine.current
@@ -995,6 +1044,8 @@ class MainWindow(QWidget):
                 ow.setWindowFlags(ow.windowFlags() | Qt.WindowStaysOnTopHint)
             ow.show()
             ow.raise_()
+        # A bar coming up takes its height back from the sidebar and the panels.
+        self._reposition_floating()
         self._show_cursor()
 
     def _hide_overlays(self, force=False):
@@ -1005,16 +1056,24 @@ class MainWindow(QWidget):
             if self.store.get("autohide") == "Never" and self.isFullScreen():
                 return
             pos = QCursor.pos()
-            for ow in self._fs_bars.values():
-                if ow.isVisible() and ow.geometry().adjusted(0, -20, 0, 20).contains(pos):
-                    self._hide_timer.start(400)
-                    return
+            # The point just under a bar is not the bar: with the left sidebar open, the
+            # pointer resting on its top few pixels kept the top bar up forever.
+            if not (self.compact.isVisible() and self.compact.geometry().contains(pos)):
+                for ow in self._fs_bars.values():
+                    if ow.isVisible() and ow.geometry().adjusted(0, -20, 0, 20).contains(pos):
+                        self._hide_timer.start(400)
+                        return
         for ow in self._fs_bars.values():
             ow.hide()
         self.preview.hide()
+        # The bars are gone: the sidebar and the panels take the room back.
+        self._reposition_floating()
 
     def _overlay_tick(self):
-        if not self.isActiveWindow() and not any(o.isVisible() for o in self._fs_bars.values()) \
+        # The left sidebar is a window of its own: clicking it made this one inactive, and the
+        # tick returned before it could hide the bars that were still on screen.
+        if not self.isActiveWindow() and not self.compact.isActiveWindow() \
+                and not any(o.isVisible() for o in self._fs_bars.values()) \
                 and self.open_panel is None:
             return
         pos = QCursor.pos()
@@ -1026,8 +1085,12 @@ class MainWindow(QWidget):
                 self._hide_timer.start(int(self.store.get("hide_after") * 1000) + 50)
             return
         zone = {0: 40, 1: 90, 2: 160}.get(int(self.store.get("fs_sensitivity")), 90)
-        near_top = pos.y() - vr.top() < zone
-        near_bottom = vr.bottom() - pos.y() < zone + 54
+        # The sidebar's own top and bottom sit inside the edge zones: hovering it would keep
+        # summoning the bar it is supposed to leave room for. The bars themselves are still
+        # reached by moving to the edge beside the sidebar.
+        over_compact = self.compact.isVisible() and self.compact.geometry().contains(pos)
+        near_top = False if over_compact else pos.y() - vr.top() < zone
+        near_bottom = False if over_compact else vr.bottom() - pos.y() < zone + 54
         if near_top or near_bottom:
             self._hide_timer.stop()
             self._show_overlays([k for k, near in (("top", near_top), ("bottom", near_bottom)) if near])
@@ -1050,7 +1113,8 @@ class MainWindow(QWidget):
         # cursor over the menu and nothing brought it back (only the video surface does that).
         if QApplication.activePopupWidget() is not None or QApplication.activeModalWidget() is not None:
             return
-        if self.isFullScreen() and not any(o.isVisible() for o in self._fs_bars.values()) and self.open_panel is None:
+        if self.isFullScreen() and not any(o.isVisible() for o in self._fs_bars.values()) \
+                and self.open_panel is None and not self.compact.isVisible():
             QApplication.setOverrideCursor(Qt.BlankCursor)
             self._cursor_hidden = True
 
@@ -1228,17 +1292,19 @@ class MainWindow(QWidget):
         vr = self.player.video_rect_global()
         if self.isFullScreen() and self.windowHandle():
             vr = self.windowHandle().screen().geometry()
-        bottom = vr.bottom()
-        if self.overlay_mode() and "bottom" in self._fs_bars:
-            bottom -= self._fs_bars["bottom"].bar.height()
-        h = max(260, bottom - vr.top() - 40)
+        # The panels reserve the bars even while they are hidden: growing one at the instant
+        # a bar disappears painted a strip along its edge.
+        top_inset, bottom_inset = self._bar_insets(reserve=True)
+        top = vr.top() + (top_inset + 10 if top_inset else 20)
+        bottom = vr.bottom() - bottom_inset - (10 if bottom_inset else 20)
+        h = max(260, bottom - top)
         # Panels ask for the width their content needs (translations are longer than the
         # English they replace); on a small window they fall back to the designed 400 px
         # and their labels elide instead.
         want = max(PANEL_W, p.content_width())
         room = max(PANEL_W, min(vr.width() - 40, int(vr.width() * PANEL_MAX_SHARE)))
         w = min(want, room)
-        p.setGeometry(vr.right() - 20 - w + 1, vr.top() + 20, w, h)
+        p.setGeometry(vr.right() - 20 - w + 1, top, w, h)
 
     def _reposition_floating(self):
         if not getattr(self, "_floating_ready", False):

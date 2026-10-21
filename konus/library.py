@@ -567,6 +567,10 @@ class EntryDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         e = index.data(Qt.UserRole)
         s = self.view.lib.scale()
+        if e and e.get("kind") == "spacer":
+            # A full-width, invisible item: it cannot fit beside the folders, so what follows
+            # starts on a row of its own.
+            return QSize(self.view.viewport().width(), 1)
         if self.mode == "card":
             tw, th, text_h = self.card_size(s, self.is_square(e))
             return QSize(tw + 20, th + 20 + text_h)
@@ -578,7 +582,7 @@ class EntryDelegate(QStyledItemDelegate):
 
     def paint(self, p, option, index):
         e = index.data(Qt.UserRole)
-        if not e:
+        if not e or e.get("kind") == "spacer":
             return
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
@@ -744,6 +748,7 @@ class EntryView(QListWidget):
         super().__init__()
         self.lib = lib
         self.mode = mode
+        self.horizontal = horizontal
         self.show_durations = False
         self.setMouseTracking(True)
         self.setItemDelegate(EntryDelegate(self, mode))
@@ -788,6 +793,21 @@ class EntryView(QListWidget):
         if self.mode == "listcol":
             self.doItemsLayout()
 
+    def _with_break(self, entries):
+        """The entries with an invisible full-width row break after the folders.
+
+        A folder page lists its folders first and its videos after them; in the grid a row of
+        three folders used to take a video into its fourth cell, and the rows under it started
+        at the wrong edge. The spacer cannot fit beside the folders, so the videos begin a
+        clean row of their own."""
+        last = max((i for i, e in enumerate(entries) if e.get("kind") == "folder"), default=-1)
+        if last < 0 or last == len(entries) - 1:
+            return entries
+        if not any(e.get("kind") not in ("add", "category", "header", "empty")
+                   for e in entries[last + 1:]):
+            return entries
+        return entries[:last + 1] + [{"kind": "spacer", "name": ""}] + entries[last + 1:]
+
     def set_entries(self, entries):
         self.setUpdatesEnabled(False)
         try:
@@ -796,7 +816,14 @@ class EntryView(QListWidget):
                 # Equal cell sizes only when every card has the same shape: on pages mixing videos
                 # and songs (Recent, Favorites, search) Qt would squeeze them all into one size.
                 self.setUniformItemSizes(len({EntryDelegate.is_square(e) for e in entries}) <= 1)
-            for e in entries:
+            rows = self._with_break(entries) if self.mode == "card" and not self.horizontal else entries
+            for e in rows:
+                if e.get("kind") == "spacer":
+                    it = QListWidgetItem("")
+                    it.setData(Qt.UserRole, e)
+                    it.setFlags(Qt.NoItemFlags)
+                    self.addItem(it)
+                    continue
                 it = QListWidgetItem(e["name"])
                 it.setData(Qt.UserRole, e)
                 flags = Qt.ItemIsEnabled
@@ -869,6 +896,8 @@ class EntryView(QListWidget):
 
     def _clicked(self, it):
         e = it.data(Qt.UserRole)
+        if not e or e.get("kind") == "spacer":
+            return
         if QApplication.keyboardModifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
             return
         # One click opens or plays. A double click out of habit must not open whatever the
@@ -887,6 +916,8 @@ class EntryView(QListWidget):
 
     def _double(self, it):
         e = it.data(Qt.UserRole)
+        if not e or e.get("kind") == "spacer":
+            return
         if e.get("loc"):
             if not self.lib.single_click_opens:
                 self.lib.navigate(e["loc"])
@@ -909,6 +940,9 @@ class EntryView(QListWidget):
     def _menu(self, pos):
         it = self.itemAt(pos)
         if not it:
+            return
+        e = it.data(Qt.UserRole)
+        if not e or e.get("kind") == "spacer":
             return
         if not it.isSelected():
             self.clearSelection()
@@ -1704,9 +1738,11 @@ class SidebarLibrary(QWidget):
 class NavItem(QWidget):
     clicked = pyqtSignal()
 
-    def __init__(self, label, icon):
+    def __init__(self, label, icon, raw=False):
         super().__init__()
-        self.label, self.icon = tr(label), icon
+        # `raw` is for user data (a folder's name): Label and MenuItem translate their text,
+        # and a folder called "Music" is not the interface's Music page.
+        self.label, self.icon = (label if raw else tr(label)), icon
         self.active = False
         self.setFixedHeight(32)
         self.setCursor(Qt.PointingHandCursor)
@@ -1732,9 +1768,11 @@ class NavItem(QWidget):
             p.setBrush(c("hover"))
             p.drawRoundedRect(QRectF(self.rect()), 4, 4)
         p.drawPixmap(3, 4, icons.pixmap(self.icon, 24, None, "active" if self.active else ""))
-        p.setFont(theme.font(14))
+        f = theme.font(14)
+        p.setFont(f)
         p.setPen(c("text_hi") if self.active else c("icon"))
-        p.drawText(QRectF(38, 0, self.width() - 40, 32), Qt.AlignVCenter, self.label)
+        p.drawText(QRectF(38, 0, self.width() - 40, 32), Qt.AlignVCenter,
+                   elide(self.label, f, self.width() - 40))
 
 
 class LibrarySidebar(QWidget):
@@ -1782,7 +1820,7 @@ class LibrarySidebar(QWidget):
         for pin in self.lib.store["pinned"]:
             if pin["kind"] not in ("folder", "playlist"):
                 continue            # see the full rail: a kind open_pin cannot open is not shown
-            n = NavItem(pin["name"], "folder" if pin["kind"] == "folder" else "playlist")
+            n = NavItem(pin["name"], "folder" if pin["kind"] == "folder" else "playlist", raw=True)
             n.clicked.connect(lambda p=pin: self.lib.open_pin(p))
             n.setContextMenuPolicy(Qt.CustomContextMenu)
             n.customContextMenuRequested.connect(

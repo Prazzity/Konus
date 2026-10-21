@@ -9,7 +9,9 @@ and it lands at once there (see MainWindow.apply_language).
 
 The screen itself is not translated, because there is nothing to translate it into yet: every
 row carries its language's name written *in* that language, and the two lines at the top say
-the same thing in English and in Russian, which is what this build speaks.
+the same thing in English and in Russian, which is what this build speaks. It offers those two
+languages only and starts on the one Windows is in — there is no "System" row, because that is
+a question rather than a language, and the answer is already known.
 """
 
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
@@ -28,15 +30,14 @@ SUBTITLE = "Выберите язык интерфейса"
 
 
 class Choice(QWidget):
-    """One language: its name written in that language, a dot that fills when it is picked,
-    and — for the system choice — the language Windows is actually in."""
+    """One language: its name written in that language, and a dot that fills when it is picked."""
 
     picked = pyqtSignal(str)
     confirmed = pyqtSignal(str)
 
-    def __init__(self, code, name, hint=""):
+    def __init__(self, code, name):
         super().__init__()
-        self.code, self.name, self.hint = code, name, hint
+        self.code, self.name = code, name
         self.selected = False
         self.setFixedHeight(56)
         self.setCursor(Qt.PointingHandCursor)
@@ -76,20 +77,16 @@ class Choice(QWidget):
         p.setFont(f)
         p.setPen(c("text_hi") if self.selected else c("text"))
         p.drawText(QRectF(54, 0, self.width() - 70, self.height()), Qt.AlignVCenter, self.name)
-        if self.hint:
-            p.setFont(theme.font(12))
-            p.setPen(c("text_2"))
-            p.drawText(QRectF(self.width() - 150, 0, 136, self.height()),
-                       Qt.AlignVCenter | Qt.AlignRight, self.hint)
 
 
 class LanguageDialog(QDialog):
     MARGIN = 24
 
-    def __init__(self, code="system"):
+    def __init__(self, code=None):
         super().__init__(None, Qt.Dialog | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.chosen = code if code in i18n.CHOICES else "system"
+        # A stored "system" (or no choice at all) opens the screen on what Windows speaks.
+        self.chosen = code if code in i18n.CHOICES else i18n.system_language()
         self._drag = None
         self.resize(640 + 2 * self.MARGIN, 470 + 2 * self.MARGIN)
         v = QVBoxLayout(self)
@@ -107,12 +104,7 @@ class LanguageDialog(QDialog):
         v.addSpacing(20)
         self.rows = {}
         for code in i18n.CHOICES:
-            name = i18n.native_name(code)
-            hint = ""
-            if code == "system":
-                name = f"{i18n.in_language('en', 'System language')} · {i18n.in_language('ru', 'System language')}"
-                hint = i18n.native_name(i18n.system_language())
-            row = Choice(code, name, hint)
+            row = Choice(code, i18n.native_name(code))
             row.picked.connect(self.pick)
             row.confirmed.connect(lambda c=code: (self.pick(c), self.accept()))
             v.addWidget(row)
@@ -131,7 +123,7 @@ class LanguageDialog(QDialog):
         for key, row in self.rows.items():
             row.selected = key == code
             row.update()
-        spoken = i18n.system_language() if code == "system" else code
+        spoken = code
         self.go.setText(i18n.in_language(spoken, "Continue"))
         self.go.fit_to_text(minimum=170, pad=44)
 
@@ -178,7 +170,7 @@ def ask(store):
     Escape (or closing the screen) keeps the language the store already had — English, on a
     fresh install — and the question is not asked again either way: the row for changing it
     later is in Settings."""
-    dialog = LanguageDialog(store.get("language") or "system")
+    dialog = LanguageDialog(store.get("language"))
     code = dialog.chosen if dialog.exec_() == QDialog.Accepted else i18n.code_for(store.get("language"))
     i18n.set_language(code)
     store.set("language", code)

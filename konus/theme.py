@@ -281,6 +281,12 @@ QMenu::item:selected { background: $HOVER; }
 QFileDialog { background: $BASE; }
 QFileDialog QWidget { color: $TEXT; }
 QFileDialog QListView, QFileDialog QTreeView { background: $FIELD; }
+/* The file views and the header are the parts painted last: until they are, the system's
+   white can show through them while the directory loads. The viewport, the header and the
+   page behind them get the app's colours up front, so a loading directory sits on dark. */
+QFileDialog QAbstractScrollArea::viewport { background: $FIELD; }
+QFileDialog QHeaderView, QFileDialog QHeaderView::section { background: $FIELD; }
+QFileDialog QStackedWidget { background: $BASE; }
 QFileDialog QPushButton { background: $ITEM; border-radius: 6px; padding: 6px 14px; }
 QFileDialog QComboBox { background: $ITEM; border-radius: 6px; padding: 4px 8px; }
 QMessageBox { background: $BASE; }

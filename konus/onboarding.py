@@ -276,18 +276,24 @@ class Onboarding(QDialog):
         self._fit_pages()
 
     def _buttons(self, back=True, next_text="Next"):
-        row = QHBoxLayout()
+        """The Back + Next/Finish group as one fixed-width box.
+
+        A group that is free to take a few spare pixels puts the same Back button six pixels
+        to the left on the page with the longer footer. Fixed width, it is the same rectangle
+        on every page; the callers align the box right."""
+        box = QWidget()
+        box.setFixedSize(208 if back else 100, 32)
+        row = QHBoxLayout(box)
         row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch(1)
+        row.setSpacing(8)
         if back:
             b = SolidButton("Back", "dark")
             b.clicked.connect(lambda: self.stack.setCurrentIndex(self.stack.currentIndex() - 1))
             row.addWidget(b)
-            row.addSpacing(8)
         n = SolidButton(next_text)
         n.clicked.connect(self._next)
         row.addWidget(n)
-        return row
+        return box
 
     def _welcome(self):
         w = QWidget()
@@ -337,7 +343,7 @@ class Onboarding(QDialog):
         row.addStretch(1)
         v.addLayout(row)
         v.addStretch(1)
-        v.addLayout(self._buttons(back=False))
+        v.addWidget(self._buttons(back=False), 0, Qt.AlignRight)
         return w
 
     def _browse(self):
@@ -384,7 +390,12 @@ class Onboarding(QDialog):
         self.swatches.picked.connect(self._pick_accent)
         bottom.addWidget(self.swatches)
         bottom.addStretch(1)
-        bottom.addLayout(self._buttons())
+        buttons = self._buttons()
+        bottom.addWidget(buttons)
+        # The swatches are 64 px tall and the buttons 32: centred in the row, Next sat 16 px
+        # above Finish on the next page. Bottom-aligned, both are in the same place, so the
+        # click that leaves one page is over the button that leaves the next.
+        bottom.setAlignment(buttons, Qt.AlignRight | Qt.AlignBottom)
         v.addLayout(bottom)
         self._pick_theme(self.store.get("theme"), apply=False)
         return w
@@ -462,7 +473,11 @@ class Onboarding(QDialog):
         bottom = QHBoxLayout()
         bottom.addWidget(Label("Find the full list in the menu.", 16, "text"))
         bottom.addStretch(1)
-        bottom.addLayout(self._buttons(next_text="Finish"))
+        buttons = self._buttons(next_text="Finish")
+        bottom.addWidget(buttons)
+        # The group is placed right as a whole, so the Back button sits in the same place here
+        # as it does on the theme page.
+        bottom.setAlignment(buttons, Qt.AlignRight | Qt.AlignBottom)
         v.addLayout(bottom)
         return w
 

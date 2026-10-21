@@ -103,6 +103,7 @@ STATE_DEFAULTS = {
     "recent_open": [],     # items opened through Open File/Folder/Stream (Open Recent menu)
     "pinned": [],          # [{kind: folder|playlist|item, ref, name}]
     "visits": {},          # folder -> count
+    "recent_folders": [],  # the up-to-eight quick-access folder slots (see folder_places)
     "plays": {},           # artist -> count
     "playlist_visits": {}, # playlist id -> count
     "bookmarks": {},       # path -> [{ms, name}]
@@ -121,6 +122,7 @@ STATE_DEFAULTS = {
 RESUME_LIMIT = 500
 RECENT_LIMIT = 200
 WATCHED_LIMIT = 2000
+FOLDER_PLACES = 8        # quick-access folder slots in the file dialogs
 
 
 def _is_url(item):
@@ -294,7 +296,7 @@ class Store(QObject):
     @staticmethod
     def _coerce_list(key, value):
         """The same for lists: a list of the right type can still hold the wrong records."""
-        if key in ("video_folders", "music_folders", "favorites", "home_hidden"):
+        if key in ("video_folders", "music_folders", "favorites", "home_hidden", "recent_folders"):
             return [v for v in value if isinstance(v, str)]
         if key == "recent":
             out = []
@@ -589,15 +591,94 @@ class Store(QObject):
         self.data["recent_open"] = []
         self.data["resume"] = {}
         self.data["visits"] = {}
+        self.data["recent_folders"] = []
         self.data["plays"] = {}
         self.data["playlist_visits"] = {}
         self.save_later()
         self.libraryChanged.emit("recent")
 
     def visit_folder(self, folder):
+        # The file dialog hands out forward slashes; the library hands out the native ones.
+        # One folder must not become two entries (and two counts) because of that.
+        folder = os.path.normpath(os.path.abspath(os.path.expanduser(folder)))
+
+        def same(a, b):
+            return isinstance(a, str) and isinstance(b, str) \
+                and os.path.normcase(a) == os.path.normcase(b)
+
+        key = os.path.normcase(folder)
         v = self.data["visits"]
+        for old in [k for k in v if not same(k, folder) and os.path.normcase(os.path.normpath(k)) == key]:
+            v[folder] = v.get(folder, 0) + v.pop(old)
         v[folder] = v.get(folder, 0) + 1
+
+        # The sidebar keeps FOLDER_PLACES folders. The one picked now takes a slot; when they
+        # are all taken, the least used of the others gives its slot up (the oldest of equals).
+        # `recent_folders` stays in use order, most recent first; folder_places sorts it.
+        slots = []
+        for f in self.data["recent_folders"]:
+            if isinstance(f, str) and not same(f, folder) and not any(same(f, s) for s in slots):
+                slots.append(os.path.normpath(f))
+        if len(slots) < FOLDER_PLACES:
+            for f in self.folder_places(FOLDER_PLACES):
+                if len(slots) >= FOLDER_PLACES:
+                    break
+                if not same(f, folder) and not any(same(f, s) for s in slots):
+                    slots.append(f)
+        slots.insert(0, folder)
+        if len(slots) > FOLDER_PLACES:
+            counts = {}
+            for f, n in v.items():
+                k = os.path.normcase(os.path.normpath(f))
+                counts[k] = counts.get(k, 0) + (n if isinstance(n, int) else 0)
+            rest = slots[1:]                     # the folder just picked is not a candidate
+            victim = min(rest, key=lambda f: (counts.get(os.path.normcase(f), 0),
+                                              -rest.index(f)))
+            slots.remove(victim)
+        self.data["recent_folders"] = slots[:FOLDER_PLACES]
         self.save_later()
+
+    def folder_places(self, limit=FOLDER_PLACES):
+        """The folder slots for the file dialogs, most used first.
+
+        `recent_folders` is the membership — the folders picked lately, most recent first,
+        at most FOLDER_PLACES. `visits` counts how often each was used. Sorting by the count
+        and then by the membership order puts the folders the user lives in at the top and
+        the newest of equals first. When the membership is not full, the most visited folders
+        fill the free slots; a config from before the slots existed gets its first eight that
+        way. Folders that are gone are dropped.
+
+        Paths are put in their native form and compared ignoring case: a folder opened through
+        the file dialog ("C:/…") and through the library ("C:\\…") is one folder."""
+        visits = self.data["visits"]
+        counts = {}
+        for f, n in visits.items():
+            key = os.path.normcase(os.path.normpath(f))
+            counts[key] = counts.get(key, 0) + (n if isinstance(n, int) else 0)
+
+        def norm(f):
+            return os.path.normpath(f) if isinstance(f, str) else None
+
+        recent = []
+        for f in self.data["recent_folders"]:
+            n = norm(f)
+            if n is not None and not any(os.path.normcase(n) == os.path.normcase(g) for g in recent):
+                recent.append(n)
+        candidates = list(recent)
+        if len(candidates) < limit:
+            extra, order = [], {}
+            for f in visits:
+                n = norm(f)
+                if n is None or any(os.path.normcase(n) == os.path.normcase(g) for g in candidates + extra):
+                    continue
+                order[n] = len(order)
+                extra.append(n)
+            extra.sort(key=lambda f: (-counts.get(os.path.normcase(f), 0), order[f]))
+            candidates += extra[:limit - len(candidates)]
+        order = {os.path.normcase(f): i for i, f in enumerate(candidates)}
+        found = [f for f in candidates if os.path.isdir(f)]
+        found.sort(key=lambda f: (-counts.get(os.path.normcase(f), 0), order[os.path.normcase(f)]))
+        return found[:limit]
 
     def count_artist(self, artist):
         if artist:

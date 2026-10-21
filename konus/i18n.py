@@ -33,8 +33,10 @@ from . import diag
 LANGUAGES = [("System", "system"), ("English", "en"), ("Русский", "ru")]
 
 # The codes the language screen offers, and how each language writes its own name: the screen
-# asks before anything is translated, so a name has to read on its own.
-CHOICES = ["system", "en", "ru"]
+# asks before anything is translated, so a name has to read on its own. There is no "System"
+# row there — the screen starts on the language Windows is in (see konus.language); the choice
+# stays in Preferences for changing the language later.
+CHOICES = ["en", "ru"]
 NATIVE = {"en": "English", "ru": "Русский"}
 
 FALLBACK = "en"
