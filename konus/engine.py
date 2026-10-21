@@ -2604,6 +2604,9 @@ class Engine(QObject):
         self._save_progress()
         self._timer.stop()
         self.stop_record()
+        # The added audio track plays in a player of its own (see start_external_audio), and
+        # stopping the film's player left it running: the window closed over sound that went on.
+        self.stop_external_audio(restore=False)
         self.mp.stop()
         self.store.save()
 
