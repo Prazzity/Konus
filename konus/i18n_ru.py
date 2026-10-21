@@ -1630,5 +1630,32 @@ TABLE = {
     "Audio track matched for one more episode": "Дорожка подобрана ещё для одной серии",
     "Audio tracks matched for {n} episodes": "Дорожки подобраны для {n} серий",
     "No audio tracks to match in this folder": "В этой папке нечего подбирать",
+
+    "Added subtitles cleared": "Добавленные субтитры убраны",
+    "Match Subtitles": "Подобрать субтитры",
+    "Match Subtitles to the Folder": "Подобрать субтитры к сериям",
+    "Match Subtitles to the Folder…": "Подобрать субтитры к сериям…",
+    "Folder with the episodes and their subtitles": "Папка с сериями и субтитрами",
+    "No subtitle files in this folder.": "В этой папке нет файлов субтитров.",
+    "no matching subtitle found": "подходящий файл субтитров не найден",
+    "Folders with subtitles": "Папки с субтитрами",
+    "Every ticked folder gives each episode its own subtitles — all of them are under "
+    "Subtitles → Sub Track.": "Каждая отмеченная папка даёт каждой серии свои субтитры — "
+                              "все они в «Субтитры → Дорожка субтитров».",
+    "Add subtitle files to episodes…": "Добавить файлы субтитров к сериям…",
+    "Add to the playing episode": "Добавить к играющей серии",
+    "Give the matched subtitles to the episode playing right now, instead of applying them when "
+    "that episode starts again.": "Отдавать подобранные субтитры серии, которая играет прямо сейчас, "
+                                  "а не при следующем запуске этой серии.",
+    "subtitle file": "файл субтитров",
+    "subtitle files_few": "файла субтитров",
+    "subtitle files": "файлов субтитров",
+    "matching subtitle file": "подходящий файл субтитров",
+    "matching subtitle files_few": "подходящих файла субтитров",
+    "matching subtitle files": "подходящих файлов субтитров",
+    "no subtitle files": "без субтитров",
+    "subtitle file remembered": "файл субтитров запомнен",
+    "subtitle files remembered_few": "файла субтитров запомнено",
+    "subtitle files remembered": "файлов субтитров запомнено",
     "Not implemented in this interface.": "В этом интерфейсе не реализовано.",
 }

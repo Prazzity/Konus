@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (QApplication, QDialog, QFileDialog, QGridLayout, QH
 from . import APP_NAME, __version__, icons, prefs, sysutil, tasks, theme
 from .i18n import tr, trn, tr_opts
 from .prefs import MOUSE_ROWS
-from .media import match_audio_tracks, track_candidates, track_folders
+from .media import match_audio_tracks, match_subtitles, track_candidates, track_folders
 from .engine import (AUDIO_EXT, MEDIA_EXT, SUB_EXT, VIDEO_EXT, display_name, ext, fmt_time, is_url, media_in_dir,
                      natural_key, parse_playlist_text)
 from .theme import c
@@ -258,8 +258,9 @@ def episode_key(name):
     return (0, int(m.group(5)))
 
 
-def match_subtitles(videos, subs):
-    """{video: subtitle} by episode number, then by name similarity."""
+def auto_subtitle_pairs(videos, subs):
+    """{video: subtitle} by episode number, then by name similarity — the one-file-per-episode
+    guess Add Subtitles makes; the folder matcher is SubtitleTracksDialog."""
     out = {}
     free = list(subs)
     by_ep = {}
@@ -509,7 +510,7 @@ class AddSubtitlesDialog(Dialog):
         else:
             videos = self._videos()
             current = {v: (self.win.store.external_subs(v) or [None])[0] for v in videos}
-            auto = match_subtitles(videos, subs)
+            auto = auto_subtitle_pairs(videos, subs)
             self.pairs = {v: current.get(v) or auto.get(v) for v in videos}
             self._subs_cache = subs
             if not videos:
@@ -593,7 +594,10 @@ class AddSubtitlesDialog(Dialog):
             n = 0
             for v, s in self.pairs.items():
                 if s:
-                    store.set_external_subs(v, [s])
+                    # The matcher can leave several languages on an episode; saving a row that
+                    # already points at one of them must not drop the others.
+                    old = store.external_subs(v)
+                    store.set_external_subs(v, old if s in old else [s])
                     n += 1
                     if engine.current == v:
                         engine.add_subtitle(s)
@@ -1505,15 +1509,15 @@ def pretty_path(path):
 class PickRow(QWidget):
     """video — "3 matching tracks, click to choose one": a row the matcher left open.
 
-    Reads like the rows around it but is a button: it opens the tracks that could belong to this
-    episode (three identically named dubs, say), which is where the user answers what the matcher
-    refused to guess."""
+    Reads like the rows around it but is a button: it opens the files that could belong to this
+    episode (three identically named dubs, or the languages of one subtitle), which is where the
+    user answers what the matcher refused to guess."""
 
     clicked = pyqtSignal()
 
-    def __init__(self, video, note):
+    def __init__(self, video, note, icon="audio"):
         super().__init__()
-        self.video, self.note = video, note
+        self.video, self.note, self.icon = video, note, icon
         self.setFixedHeight(36)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -1539,7 +1543,7 @@ class PickRow(QWidget):
             p.setBrush(c("field"))
             p.drawRoundedRect(QRectF(self.rect()), 6, 6)
             p.drawPixmap(self.width() - 34, 6, icons.pixmap("swap", 24))
-        p.drawPixmap(10, 6, icons.pixmap("audio", 24))
+        p.drawPixmap(10, 6, icons.pixmap(self.icon, 24))
         f = theme.font(14)
         fm = QFontMetrics(f)
         p.setFont(f)
@@ -1553,18 +1557,40 @@ class PickRow(QWidget):
                    elide(self.note, f, self.width() - x - 40))
 
 
-class AudioTracksDialog(Dialog):
-    """Match the audio files in a folder to its episodes by name and remember the pairs.
+class _MatchTracksDialog(Dialog):
+    """Match the files in a folder to its episodes by name and remember the pairs.
 
     The tracks of a release live in folders of their own ("RUS Sound", and under it one folder
-    per dub), so those folders are listed with their track counts and the user ticks the ones to
-    take tracks from — that is what tells three identically named dubs apart, and the row shows
-    the folder its track came from. Every ticked folder that has the episode's own track gives
-    it one, so ticking three dubs leaves three tracks on that episode: the row shows how many
-    there are, the first folder listed is the one that plays, and the others are a Sound menu
-    pick away while it runs. Opening the dialog again shows the folders the episodes' tracks came
-    from last time, so it opens on the user's own choice. The switch by the Add button hands the
-    tracks to the episode that is playing right now instead of waiting for it to start again."""
+    per dub), and the subtitles of a season live in "Subs" or next to the episodes, often in
+    several languages for one episode. Those folders are listed with their file counts and the
+    user ticks the ones to take files from — that is what tells three identically named dubs
+    apart, and the row shows the folder its file came from. Every ticked folder that has the
+    episode's own file gives it one, so ticking three dubs leaves three tracks on that episode,
+    while one folder holding an episode in three languages gives it all three subtitle files.
+    The row shows how many there are, the first folder listed is the one that is picked first,
+    and the rest are a pick away in the Sound / Subtitle menu while it runs. Opening the dialog
+    again shows the folders the episodes' files came from last time, so it opens on the user's
+    own choice. The switch by the Add button hands the files to the episode that is playing
+    right now instead of waiting for it to start again."""
+
+    TITLE = "Match Tracks"
+    KINDS = MEDIA_EXT
+    ICON = "file"
+    MATCHER = None                   # static match_audio_tracks / match_subtitles, set below
+    ACTIVATE_SETTING = ""
+    ACTIVATE_LABEL = ""
+    ACTIVATE_TIP = ""
+    OPEN_FOLDER = ""
+    NO_FILES = ""
+    FOLDERS_HEADER = ""
+    FOLDERS_NOTE = ""
+    NO_MATCH = ""
+    NO_ITEM = ""
+    NO_ITEM_LOWER = ""
+    MATCHING = ""
+    MATCHING_PLURAL = ""
+    COUNT = ""
+    COUNT_PLURAL = ""
 
     def __init__(self, win, target_path=None, items=None):
         self.win = win
@@ -1576,36 +1602,35 @@ class AudioTracksDialog(Dialog):
         self.where.setCursor(Qt.PointingHandCursor)
         self.where.mousePressEvent = lambda e: self._choose_folder()
         th.addWidget(self.where, 1)
-        super().__init__(win, "Match Audio Tracks", 900, 640, tools=tools, fill="base",
+        super().__init__(win, self.TITLE, 900, 640, tools=tools, fill="base",
                          save_text="Add")
         act = QWidget()
         ah = QHBoxLayout(act)
         ah.setContentsMargins(0, 0, 14, 0)
         ah.setSpacing(10)
-        ah.addWidget(Label("Activate the track", 14, "text_2"))
+        ah.addWidget(Label(self.ACTIVATE_LABEL, 14, "text_2"))
         self.activate = Toggle()
-        self.activate.setChecked(win.store.get("activate_matched_audio") is not False)
+        self.activate.setChecked(win.store.get(self.ACTIVATE_SETTING) is not False)
         ah.addWidget(self.activate)
-        act.setToolTip(tr("Give the matched track to the episode playing right now, instead of "
-                          "applying it when that episode starts again."))
+        act.setToolTip(tr(self.ACTIVATE_TIP))
         self.footer.layout().insertWidget(2, act)      # beside Add: it is what Add does
         self.items = items
         self.target_path = target_path or win.engine.current
         self.folder = None
         if self.target_path and not is_url(self.target_path):
-            self.folder = self.target_path if os.path.isdir(self.target_path)                 else os.path.dirname(self.target_path)
+            self.folder = self.target_path if os.path.isdir(self.target_path) else os.path.dirname(self.target_path)
         self.list_host = QWidget()
         self.list_lay = QVBoxLayout(self.list_host)
         self.list_lay.setContentsMargins(10, 10, 10, 10)
         self.list_lay.setSpacing(4)
         self.body_lay.setContentsMargins(20, 10, 20, 0)
         self.body_lay.addWidget(scroll(self.list_host), 1)
-        self.rows = {}                  # video -> (CheckRow, its tracks — the first one plays)
-        self.picks = {}                 # video -> the tracks the matcher would not choose between
-        self.chosen = {}                # video -> the track the user picked by hand
-        self.skipped = set()            # videos the user left without a track
-        self.found = []                 # [(folder, tracks)] where tracks were found
-        self.checked = None             # folders to take tracks from (None: the first build)
+        self.rows = {}                  # video -> (CheckRow, its files — the first one is picked)
+        self.picks = {}                 # video -> the files the matcher would not choose between
+        self.chosen = {}                # video -> the file the user picked by hand
+        self.skipped = set()            # videos the user left without a file
+        self.found = []                 # [(folder, files)] where files were found
+        self.checked = None             # folders to take files from (None: the first build)
         self.rebuild()
 
     def _videos(self):
@@ -1614,7 +1639,7 @@ class AudioTracksDialog(Dialog):
         return media_in_dir(self.folder, VIDEO_EXT) if self.folder else []
 
     def _choose_folder(self):
-        d = FileDialog.getExistingDirectory(self, "Folder with the episodes and their tracks",
+        d = FileDialog.getExistingDirectory(self, self.OPEN_FOLDER,
                                             self.folder or os.path.expanduser("~"),
                                             options=self.win.dialog_options())
         if d:
@@ -1626,13 +1651,13 @@ class AudioTracksDialog(Dialog):
 
     def _folders(self):
         """The ticked folders, in the order they are listed: that order is what decides between
-        two equal tracks of different folders, so it has to be the one the user sees."""
+        two equal files of different folders, so it has to be the one the user sees."""
         return [f for f, _ in self.found if f in (self.checked or ())]
 
-    def _tracks(self):
+    def _files(self):
         out = []
         for folder in self._folders():
-            out += media_in_dir(folder, AUDIO_EXT)
+            out += media_in_dir(folder, self.KINDS)
         return out
 
     def _folder_toggled(self, folder, on):
@@ -1657,100 +1682,99 @@ class AudioTracksDialog(Dialog):
             self.save.setEnabled(False)          # nothing to match: Save must not offer itself
             self.count_note(0)                   # the count was left over from the previous folder
             return
-        self.found = track_folders(self.folder) if self.folder else []
+        self.found = track_folders(self.folder, self.KINDS) if self.folder else []
         here = {f for f, _ in self.found}
         if self.checked is None:
-            # The folders the episodes' own tracks come from: opening the dialog again shows the
-            # choice made last time (which dub, or which "RUS Sound") rather than every folder
-            # that happens to hold audio.
+            # The folders the episodes' own files come from: opening the dialog again shows the
+            # choice made last time (which dub, or which language folder) rather than every
+            # folder that happens to hold the right kind of file.
             self.checked = self._stored_folders(videos, here) or set(here)
         else:
             self.checked &= here
         if self.found:
-            self.list_lay.addWidget(Label("Folders with tracks", 14, "text_2"))
+            self.list_lay.addWidget(Label(self.FOLDERS_HEADER, 14, "text_2"))
             for folder, n in self.found:
-                row = CheckRow(f"{self._folder_name(folder)}   —   {trn('track', 'tracks', n)}",
+                row = CheckRow(f"{self._folder_name(folder)}   —   {trn(self.COUNT, self.COUNT_PLURAL, n)}",
                                folder in self.checked, icon="folder")
                 row.setToolTip(folder)
                 row.toggled.connect(lambda on, f=folder: self._folder_toggled(f, on))
                 self.list_lay.addWidget(row)
             # What the ticks add up to, said once here rather than in every row: the count
-            # beside an episode is this many tracks, and the menu is where the rest of them are.
-            self.list_lay.addWidget(Label(
-                "Every ticked folder gives each episode its own track — the first one plays, "
-                "the rest are under Audio → Audio Track.", 14, "text_3", wrap=True))
+            # beside an episode is this many files, and the menu is where the rest of them are.
+            self.list_lay.addWidget(Label(self.FOLDERS_NOTE, 14, "text_3", wrap=True))
             self.list_lay.addSpacing(8)
         else:
-            self.list_lay.addWidget(Label("No audio files in this folder.", 14, "text_3"))
+            self.list_lay.addWidget(Label(self.NO_FILES, 14, "text_3"))
         self._episodes(videos)
         self.save.setEnabled(bool(self.rows) or bool(self.skipped))
         self.count_note(len(videos))
         self.list_lay.addStretch(1)
 
     def _stored_folders(self, videos, here):
-        """The folders of `here` the episodes' remembered tracks live in."""
+        """The folders of `here` the episodes' remembered files live in."""
         want = set()
         for v in videos:
-            for track in self.win.store.external_audio(v):
-                folder = os.path.dirname(track)
+            for path in self._stored(v):
+                folder = os.path.dirname(path)
                 if folder in here:
                     want.add(folder)
         return want
 
     def _episodes(self, videos):
-        """The episode rows, with the tracks each one gets: matched — one per ticked folder, the
-        count shown on the row and the first of them the one that plays — left to the user to
-        pick (several tracks of the ticked folders look equally right), or none at all.
+        """The episode rows, with the files each one gets: matched — one per ticked folder, the
+        count shown on the row and the first of them the one that is picked first — left to the
+        user to pick (several files of the ticked folders look equally right), or none at all.
 
-        An episode that already uses a track of a ticked folder keeps it in front: the dialog
+        An episode that already uses a file of a ticked folder keeps it in front: the dialog
         opens on what the episodes use, so pressing Add again changes nothing. Untick that
-        folder and the episode is matched afresh, which is how a season moves to another dub."""
-        tracks = self._tracks()
-        pairs = dict(match_audio_tracks(videos, self._folders())) if tracks else {}
+        folder and the episode is matched afresh, which is how a season moves to another dub
+        or another set of subtitles."""
+        files = self._files()
+        pairs = dict(self.MATCHER(videos, self._folders())) if files else {}
         for v in videos:
-            cands = track_candidates(v, tracks)
+            cands = track_candidates(v, files)
             if v in self.skipped:
                 got = []
             elif v in self.chosen:
                 got = [self.chosen[v]]
             else:
-                got = self._episode_tracks(v, pairs.get(v) or [], cands)
+                got = self._episode_files(v, pairs.get(v) or [], cands)
             if got:
-                row = CheckRow(f"{os.path.basename(v)}   —   {self._track_name(got[0])}", True,
-                               icon="audio", note=self._tracks_note(got))
-                row.setToolTip("\n".join(self._track_name(t) for t in got))
+                row = CheckRow(f"{os.path.basename(v)}   —   {self._file_name(got[0])}", True,
+                               icon=self.ICON, note=self._files_note(got))
+                row.setToolTip("\n".join(self._file_name(t) for t in got))
                 self.rows[v] = (row, got)
                 self.list_lay.addWidget(row)
                 continue
             if cands:
-                note = (tr("no track") if v in self.skipped
-                        else trn("matching track", "matching tracks", len(cands))) \
+                note = (tr(self.NO_ITEM_LOWER) if v in self.skipped
+                        else trn(self.MATCHING, self.MATCHING_PLURAL, len(cands))) \
                     + ", " + tr("click to choose")
-                row = PickRow(v, note)
-                row.setToolTip("\n".join(self._track_name(t) for t in cands))
+                row = PickRow(v, note, icon=self.ICON)
+                row.setToolTip("\n".join(self._file_name(t) for t in cands))
                 row.clicked.connect(lambda v=v: self._choose(v))
                 self.picks[v] = cands
                 self.list_lay.addWidget(row)
             else:
-                self.list_lay.addWidget(Label(f"{os.path.basename(v)}   —   " + tr("no matching track found"),
+                self.list_lay.addWidget(Label(f"{os.path.basename(v)}   —   " + tr(self.NO_MATCH),
                                               14, "text_3"))
 
-    def _episode_tracks(self, video, matched, cands):
-        """What this episode gets from the ticked folders: every track the matcher found, with
-        the one the episode already uses in front — that is the one that plays, and the others
-        are a Sound → Audio Track pick away. An episode whose tracks the matcher would not
-        choose between (none found, but the folders hold candidates) keeps what it has, so a
-        pick made by hand survives the next open."""
-        stored = [t for t in self.win.store.external_audio(video) if t in cands]
+    def _episode_files(self, video, matched, cands):
+        """What this episode gets from the ticked folders: every file the matcher found, with
+        the one the episode already uses in front — that is the one that is picked first, and
+        the others are a Sound / Subtitle menu pick away. An episode whose files the matcher
+        would not choose between (none found, but the folders hold candidates) keeps what it
+        has, so a pick made by hand survives the next open."""
+        stored = [t for t in self._stored(video) if t in cands]
         if not matched:
             return stored
         kept = [t for t in stored if t in matched]
         return kept + [t for t in matched if t not in kept]
 
-    def _tracks_note(self, tracks):
-        """The count beside an episode that got more than one track — the folders it is ticked
+    def _files_note(self, files):
+        """The count beside an episode that got more than one file — the folders it is ticked
         for all had one for it, and the row says so instead of quietly showing the first."""
-        return trn("track", "tracks", len(tracks)) if len(tracks) > 1 else ""
+        return trn(self.COUNT, self.COUNT_PLURAL, len(files)) if len(files) > 1 else ""
 
     def _folder_name(self, folder):
         """A path the user knows from Explorer — "RUS Sound/AniLibria", or the folder being
@@ -1758,59 +1782,165 @@ class AudioTracksDialog(Dialog):
         rel = os.path.relpath(folder, self.folder) if self.folder else folder
         return tr("This folder") if rel == "." else rel
 
-    def _track_name(self, track):
-        """The track's own folder relative to the one being scanned, when it is in a subfolder."""
-        if self.folder and os.path.dirname(track) != self.folder:
-            return os.path.relpath(track, self.folder)
-        return os.path.basename(track)
+    def _file_name(self, path):
+        """The file's own folder relative to the one being scanned, when it is in a subfolder."""
+        if self.folder and os.path.dirname(path) != self.folder:
+            return os.path.relpath(path, self.folder)
+        return os.path.basename(path)
 
     def _choose(self, video):
-        """The row the matcher left open: pick this episode's track by hand."""
-        items = [MenuItem(self._track_name(t), lambda t=t, v=video: self._pick(v, t), raw=True,
+        """The row the matcher left open: pick this episode's file by hand."""
+        items = [MenuItem(self._file_name(t), lambda t=t, v=video: self._pick(v, t), raw=True,
                           checked=self.chosen.get(video) == t) for t in self.picks.get(video, [])]
-        items += [sep(), MenuItem("No track", lambda v=video: self._pick(v, None),
+        items += [sep(), MenuItem(self.NO_ITEM, lambda v=video: self._pick(v, None),
                                   icon="remove", icon_variant="")]
         PopupMenu(items, self, width=560, row=40).popup(QCursorPos())
 
-    def _pick(self, video, track):
-        if track is None:
+    def _pick(self, video, path):
+        if path is None:
             self.chosen.pop(video, None)
             self.skipped.add(video)
         else:
             self.skipped.discard(video)
-            self.chosen[video] = track
+            self.chosen[video] = path
         self.rebuild()
 
     def count_note(self, total):
-        self.title_label.setText(tr("Match Audio Tracks") +
+        self.title_label.setText(tr(self.TITLE) +
                                  (f" — {trn('episode', 'episodes', total)}" if total else ""))
+
+    def _stored(self, video):
+        raise NotImplementedError
+
+    def _remember(self, video, files):
+        raise NotImplementedError
+
+    def _saved_message(self, saved):
+        raise NotImplementedError
+
+    def _apply_current(self, engine, before):
+        raise NotImplementedError
 
     def accept_clicked(self):
         store, engine = self.win.store, self.win.engine
-        store.set("activate_matched_audio", self.activate.isChecked())
+        store.set(self.ACTIVATE_SETTING, self.activate.isChecked())
+        before = self._stored(engine.current) if engine.current else []
         saved, touched = 0, False
-        for video, (row, tracks) in self.rows.items():
+        for video, (row, files) in self.rows.items():
             # a file that disappeared between the scan and Add is not remembered as this
-            # episode's track (the store filters those out on read, so it was a dead entry)
-            want = [t for t in tracks if os.path.exists(t)] if row.checked else []
+            # episode's file (the store filters those out on read, so it was a dead entry)
+            want = [t for t in files if os.path.exists(t)] if row.checked else []
             saved += 1 if want else 0
-            if store.external_audio(video) != want:
-                store.set_external_audio(video, want)
+            if self._stored(video) != want:
+                self._remember(video, want)
                 touched = touched or video == engine.current
         for video in self.skipped:
-            if store.external_audio(video):
-                store.set_external_audio(video, [])
+            if self._stored(video):
+                self._remember(video, [])
                 touched = touched or video == engine.current
-        self.win.notify(trn("audio track remembered", "audio tracks remembered", saved) if saved
-                        else tr("Added audio tracks cleared"))
+        self.win.notify(self._saved_message(saved))
         if touched and self.activate.isChecked() and engine.is_active():
-            # The episode playing right now: its new tracks take over at once (the others get
+            # The episode playing right now: its new files take over at once (the others get
             # theirs when they start, see engine._start_item)
-            if store.external_audio(engine.current):
-                engine.start_external_audio()
-            else:
-                engine.stop_external_audio()
+            self._apply_current(engine, before)
         self.accept()
+
+
+class AudioTracksDialog(_MatchTracksDialog):
+    """The audio matcher: a release's tracks are spread over "RUS Sound" style folders, one
+    per dub, and every ticked folder gives each episode its own track. The first one plays and
+    the rest wait in Sound → Audio Track while it runs."""
+
+    TITLE = "Match Audio Tracks"
+    KINDS = AUDIO_EXT
+    ICON = "audio"
+    MATCHER = staticmethod(match_audio_tracks)
+    ACTIVATE_SETTING = "activate_matched_audio"
+    ACTIVATE_LABEL = "Activate the track"
+    ACTIVATE_TIP = ("Give the matched track to the episode playing right now, instead of "
+                    "applying it when that episode starts again.")
+    OPEN_FOLDER = "Folder with the episodes and their tracks"
+    NO_FILES = "No audio files in this folder."
+    FOLDERS_HEADER = "Folders with tracks"
+    FOLDERS_NOTE = ("Every ticked folder gives each episode its own track — the first one plays, "
+                    "the rest are under Audio → Audio Track.")
+    NO_MATCH = "no matching track found"
+    NO_ITEM = "No track"
+    NO_ITEM_LOWER = "no track"
+    MATCHING = "matching track"
+    MATCHING_PLURAL = "matching tracks"
+    COUNT = "track"
+    COUNT_PLURAL = "tracks"
+
+    def _stored(self, video):
+        return self.win.store.external_audio(video)
+
+    def _remember(self, video, tracks):
+        self.win.store.set_external_audio(video, tracks)
+
+    def _saved_message(self, saved):
+        return (trn("audio track remembered", "audio tracks remembered", saved) if saved
+                else tr("Added audio tracks cleared"))
+
+    def _apply_current(self, engine, before):
+        if self._stored(engine.current):
+            engine.start_external_audio()
+        else:
+            engine.stop_external_audio()
+
+
+class SubtitleTracksDialog(_MatchTracksDialog):
+    """The subtitle matcher: a season's files live in "Subs", one folder per language or all
+    languages together, and every ticked folder gives each episode its own subtitles — all of
+    the languages found for it, not a single guess. The row shows the count, and Subtitle →
+    Sub Track switches between them while it plays."""
+
+    TITLE = "Match Subtitles"
+    KINDS = SUB_EXT
+    ICON = "subtitles"
+    MATCHER = staticmethod(match_subtitles)
+    ACTIVATE_SETTING = "activate_matched_subs"
+    ACTIVATE_LABEL = "Add to the playing episode"
+    ACTIVATE_TIP = ("Give the matched subtitles to the episode playing right now, instead of "
+                    "applying them when that episode starts again.")
+    OPEN_FOLDER = "Folder with the episodes and their subtitles"
+    NO_FILES = "No subtitle files in this folder."
+    FOLDERS_HEADER = "Folders with subtitles"
+    FOLDERS_NOTE = ("Every ticked folder gives each episode its own subtitles — all of them "
+                    "are under Subtitles → Sub Track.")
+    NO_MATCH = "no matching subtitle found"
+    NO_ITEM = "No subtitles"
+    NO_ITEM_LOWER = "no subtitle files"
+    MATCHING = "matching subtitle file"
+    MATCHING_PLURAL = "matching subtitle files"
+    COUNT = "subtitle file"
+    COUNT_PLURAL = "subtitle files"
+
+    def _stored(self, video):
+        return self.win.store.external_subs(video)
+
+    def _remember(self, video, subs):
+        self.win.store.set_external_subs(video, subs)
+
+    def _saved_message(self, saved):
+        return (trn("subtitle file remembered", "subtitle files remembered", saved) if saved
+                else tr("Added subtitles cleared"))
+
+    def accept_clicked(self):
+        # What is really loaded includes the files found next to the video, which the matcher
+        # may match too: adding one of them again would leave the same subtitle twice.
+        engine = self.win.engine
+        self._loaded_before = engine.external_subtitles() if engine.current else []
+        super().accept_clicked()
+
+    def _apply_current(self, engine, before):
+        want = self._stored(engine.current)
+        if any(sub not in want for sub in before):
+            engine.reload_media()       # libVLC cannot detach a subtitle: start the item again
+        else:
+            for sub in want:
+                if sub not in self._loaded_before:
+                    engine.add_subtitle(sub, remember=False)
 
 
 class AboutDialog(Dialog):

@@ -623,27 +623,34 @@ def episode_key(key):
 
 
 def _without_lang(key):
-    """Drop the trailing language marker an audio track usually carries: "… ep 01 rus" -> "… ep 01"."""
+    """Drop the trailing language marker an external file usually carries: "… ep 01 rus" -> "… ep 01"."""
     words = key.split()
     while words and words[-1] in _LANG_TAGS:
         words.pop()
     return " ".join(words)
 
 
-def same_episode(video_key, audio_key):
-    """Whether an audio file belongs to this video.
+def _language_free(key):
+    """A name with every language marker gone, wherever it sits: "rus 01" and "01 eng" are
+    the same subtitle in two languages. It tells a season's language variants apart from two
+    different files that happen to share an episode number."""
+    return " ".join(w for w in key.split() if w not in _LANG_TAGS)
+
+
+def same_episode(video_key, file_key):
+    """Whether an external file — a track, a subtitle — belongs to this video.
 
     The episode number decides: releases name their files differently ("ep.01", "01", "S02E05"),
     but 5 is 5. A season is only compared when both names carry one, so "S02E05" matches
     "…ep.05…" and no longer matches "S03E05". Only when neither name has a number do the names
     themselves have to line up."""
-    a, b = _without_lang(audio_key).replace(" ", ""), video_key.replace(" ", "")
+    a, b = _without_lang(file_key).replace(" ", ""), video_key.replace(" ", "")
     if a == b:
         return True
     if not a or not b:
         return False
     vs, ve = episode_key(video_key)
-    as_, ae = episode_key(audio_key)
+    as_, ae = episode_key(file_key)
     if ve is not None and ae is not None:
         return ve == ae and (vs is None or as_ is None or vs == as_)
     if ve is not None or ae is not None:
@@ -652,33 +659,35 @@ def same_episode(video_key, audio_key):
     return len(shorter) >= 8 and longer.startswith(shorter)
 
 
-def shared_words(video_key, audio_key):
-    """Words that mean something in both names ("stone"), to prefer one of two tracks that
+def shared_words(video_key, file_key):
+    """Words that mean something in both names ("stone"), to prefer one of two files that
     happen to carry the same episode number."""
     def words(key):
         return {w for w in _without_lang(key).split()
                 if len(w) >= 3 and w.isalpha() and w not in _LANG_TAGS}
-    return words(video_key) & words(audio_key)
+    return words(video_key) & words(file_key)
 
 
-def _fit_score(video_key, track_key):
-    """How well a track's name fits a video: 3 — the names are the same, 2 — the same episode
+def _fit_score(video_key, file_key):
+    """How well a file's name fits a video: 3 — the names are the same, 2 — the same episode
     number and a shared title word, 1 — only the number lines up."""
-    if track_key == video_key:
+    if file_key == video_key:
         return 3
-    if shared_words(video_key, track_key):
+    if shared_words(video_key, file_key):
         return 2
     return 1
 
 
-def track_folders(root, depth=3, limit=500):
-    """[(folder, tracks)]: the folders under `root` that hold audio files — `root` itself first,
-    then its subfolders the way a file manager shows them, `depth` levels down at most.
+def track_folders(root, kinds=AUDIO_EXT, depth=3, limit=500):
+    """[(folder, files)]: the folders under `root` that hold files of `kinds` — audio tracks by
+    default, subtitle files when asked — `root` itself first, then its subfolders the way a
+    file manager shows them, `depth` levels down at most.
 
     A release keeps its tracks in folders of their own — "RUS Sound", and under it one folder
-    per dub — so what a matcher needs is the list of places tracks actually live, not a guess at
-    how deep they are buried. The dialog shows this list for the user to choose from, which is
-    also what tells three identically named dubs apart."""
+    per dub — and its subtitles in "Subs" or one folder per language, so what a matcher needs
+    is the list of places files actually live, not a guess at how deep they are buried. The
+    dialog shows this list for the user to choose from, which is also what tells three
+    identically named dubs apart."""
     if not root or not os.path.isdir(root):
         return []
     out = []
@@ -696,7 +705,7 @@ def track_folders(root, depth=3, limit=500):
             if e.name.startswith("."):
                 continue
             try:
-                if e.is_file() and ext(e.name) in AUDIO_EXT:
+                if e.is_file() and ext(e.name) in kinds:
                     n += 1
                 elif e.is_dir() and level < depth:
                     subs.append((e.path, level + 1))
@@ -708,14 +717,75 @@ def track_folders(root, depth=3, limit=500):
     return out
 
 
-def track_candidates(video, tracks):
-    """The tracks that can pass for this video's episode — `same_episode` by name — the most
-    likely first. What a folder of three dubs offers for one episode, and what the dialog lists
-    when the matcher refused to choose between them."""
+def track_candidates(video, files):
+    """The files that can pass for this video's episode — `same_episode` by name — the most
+    likely first. What a folder of three dubs offers for one episode, what a "Subs" folder
+    offers in its several languages, and what the dialog lists when the matcher refused to
+    choose between them."""
     vkey = name_key(video)
-    pairs = [(t, name_key(t)) for t in tracks]
+    pairs = [(t, name_key(t)) for t in files]
     return [t for t, k in sorted((p for p in pairs if same_episode(vkey, p[1])),
                                  key=lambda p: -_fit_score(vkey, p[1]))]
+
+
+def _match_files(videos, folders, kinds, language_variants=False):
+    """[(video, [files])]: the files of `kinds` from `folders` that belong to each video — what
+    every ticked folder has for it, the closest names first (and after them the folder listed
+    first). The shared engine of match_audio_tracks and match_subtitles.
+
+    A folder can hold one episode's file more than once — the same episode in two languages,
+    named alike — and then all of them are its, the count on the row says how many. With
+    `language_variants` (subtitles), files whose names are the same once the language markers
+    are gone ("01 rus" / "01 eng") are such a set even when their names share nothing else;
+    for audio the same tie is refused, because two dubs with that little in common are not
+    something to guess about.
+
+    A folder whose *only* claim on an episode is its number offers it nothing when two files
+    claim the same number: that is a folder holding two series that both have an "05", and a
+    wrong pair is worse than a row left for the user to answer (what it had to offer is in
+    track_candidates, and the dialog asks)."""
+    files = []
+    position = {}                            # file -> where its folder sits in the list
+    for i, folder in enumerate(folders):
+        if not folder or not os.path.isdir(folder):
+            continue
+        for path in media_in_dir(folder, kinds):
+            if path not in position:
+                position[path] = i
+                files.append(path)
+    if not files:
+        return []
+    keys = [(f, name_key(f)) for f in files]
+    used = set()
+    out = []
+    for video in videos:
+        vkey = name_key(video)
+        # What each folder has for this episode: its best-scoring names, and nothing at all
+        # from a folder whose only claim is a number shared by two of its files.
+        best = {}                            # folder -> [score, [files]]
+        for path, pkey in keys:
+            if path in used or not same_episode(vkey, pkey):
+                continue
+            score = _fit_score(vkey, pkey)
+            folder = position[path]
+            was = best.get(folder)
+            if was is None or score > was[0]:
+                best[folder] = [score, [path]]
+            elif score == was[0]:
+                was[1].append(path)
+        got = []
+        for folder, (score, found) in sorted(best.items(), key=lambda f: (-f[1][0], f[0])):
+            if score == 1 and len(found) > 1:
+                # Two files that only share the number: no decision. Subtitles are the
+                # exception when the names are one name once the languages are gone.
+                if not (language_variants and
+                        len({_language_free(k) for f, k in keys if f in found}) == 1):
+                    continue
+            got += found
+        if got:
+            used.update(got)
+            out.append((video, got))
+    return out
 
 
 def match_audio_tracks(videos, folders):
@@ -729,50 +799,19 @@ def match_audio_tracks(videos, folders):
     Track menu — see engine.audio_tracks). A folder can also hold one episode's audio more than
     once — the same episode in two languages, named alike — and then all of them are its, the
     count on the row says how many. Only the folders in the list are scanned: the callers hand
-    over the ones they mean (the dialog, the ones the user ticked: see track_folders).
+    over the ones they mean (the dialog, the ones the user ticked: see track_folders)."""
+    return _match_files(videos, folders, AUDIO_EXT)
 
-    A folder whose *only* claim on an episode is its number offers it nothing when two files
-    claim the same number: that is a folder holding two series that both have an "05", and a
-    wrong pair is worse than a row left for the user to answer (what it had to offer is in
-    track_candidates, and the dialog asks)."""
-    tracks = []
-    position = {}                            # track -> where its folder sits in the list
-    for i, folder in enumerate(folders):
-        if not folder or not os.path.isdir(folder):
-            continue
-        for track in media_in_dir(folder, AUDIO_EXT):
-            if track not in position:
-                position[track] = i
-                tracks.append(track)
-    if not tracks:
-        return []
-    keys = [(t, name_key(t)) for t in tracks]
-    used = set()
-    out = []
-    for video in videos:
-        vkey = name_key(video)
-        # What each folder has for this episode: its best-scoring names, and nothing at all
-        # from a folder whose only claim is a number shared by two of its files.
-        best = {}                            # folder -> [score, [tracks]]
-        for track, tkey in keys:
-            if track in used or not same_episode(vkey, tkey):
-                continue
-            score = _fit_score(vkey, tkey)
-            folder = position[track]
-            was = best.get(folder)
-            if was is None or score > was[0]:
-                best[folder] = [score, [track]]
-            elif score == was[0]:
-                was[1].append(track)
-        got = []
-        for folder, (score, found) in sorted(best.items(), key=lambda f: (-f[1][0], f[0])):
-            if score == 1 and len(found) > 1:
-                continue                     # two files that only share the number: no decision
-            got += found
-        if got:
-            used.update(got)
-            out.append((video, got))
-    return out
+
+def match_subtitles(videos, folders):
+    """[(video, [subtitle files])]: the subtitle files from `folders` that belong to each video.
+
+    The audio matcher for subtitle files, with one difference: a folder commonly holds one
+    episode in several languages — "01 rus" and "01 eng" side by side, or one folder per
+    language — and all of them are that episode's subtitles rather than an ambiguity to ask
+    about. Files that only share the episode number and are not merely language variants of
+    one name are still left for the user to choose (see track_candidates)."""
+    return _match_files(videos, folders, SUB_EXT, language_variants=True)
 
 
 def _starts_as(name, stem):

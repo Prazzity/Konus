@@ -2425,6 +2425,17 @@ class MainWindow(QWidget):
             return
         AudioTracksDialog(self, path).exec_()
 
+    def match_subtitles(self, path=None):
+        """Open the subtitle matcher for the current file's folder: it finds each episode's
+        own subtitle files (in "Subs", one folder per language or all together) and remembers
+        the pairs — every language a folder holds for an episode, not one guess."""
+        from .dialogs import SubtitleTracksDialog
+        path = path or self.engine.current
+        if not path or is_url(path):
+            self.notify(tr("Play a video or choose a folder first"))
+            return
+        SubtitleTracksDialog(self, path).exec_()
+
     def auto_match_audio(self, video, track=None):
         """After one track is added, give the other episodes of that folder theirs too:
         the scan runs in the background, the pairs land in the settings.
@@ -2479,6 +2490,8 @@ class MainWindow(QWidget):
             MenuItem("Add Subtitle File…", self._add_sub_file, enabled=bool(e.current)),
             MenuItem("Add Subtitles to Folder / Playlist…", lambda: self.open_add_subtitles(
                 os.path.dirname(e.current) if e.current and not is_url(e.current) else None, "folder"),
+                     enabled=bool(e.current) and not is_url(e.current or "")),
+            MenuItem("Match Subtitles to the Folder…", lambda: self.match_subtitles(e.current),
                      enabled=bool(e.current) and not is_url(e.current or "")),
             MenuItem("Sub Track", submenu=lambda: [MenuItem(n, lambda i=i: e.set_spu(i), checked=e.spu() == i, raw=True)
                                                    for i, n in e.spu_tracks()] or [MenuItem("None", enabled=False)]),

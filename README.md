@@ -50,8 +50,12 @@ an episode you copy into that folder later.
 
 ![Matching audio tracks to the episodes of a folder](screenshots/tracks.jpg)
 
-**Add subtitles to a folder.** The same trick for subtitles: point it at a season's worth of `.srt` files and it
-pairs them with the episodes by number and name, in one pass. Correct any row you don't agree with before saving.
+**Match subtitles to the folder.** Subtitles → *Match subtitles to the folder…* does the same for the loose
+`.srt`/`.ass` files: it reads the folder and its subfolders — a single "Subs", one folder per language, or all
+languages together — and pairs each episode with its own subtitles by number and name. Every language a ticked
+folder holds for an episode is kept, not just one guess: the row shows how many there are, and *Subtitles → Sub
+Track* switches between them while it plays. Correct any row you don't agree with before saving. *Add subtitles*
+is still there for a single file, a link or OpenSubtitles.
 
 ![Matching subtitles to a season](screenshots/subtitles.jpg)
 

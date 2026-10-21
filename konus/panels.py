@@ -317,7 +317,7 @@ class TracksPanel(Panel):
         self.slist.picked.connect(self.engine.set_spu)
         f.widget(self.slist)
         f.line()
-        edit = IconButton("edit", "Match subtitle files to episodes…", box=(30, 30))
+        edit = IconButton("edit", "Add subtitle files to episodes…", box=(30, 30))
         edit.clicked.connect(lambda: self.win.open_add_subtitles())
         add = IconButton("add", "Add a subtitle file…", box=(30, 30))
         add.clicked.connect(self._add_sub)
@@ -327,6 +327,10 @@ class TracksPanel(Panel):
         f.widget(self.xlist)
         self.xempty = Label("Add a subtitle file with +, or drop one on the video.", 13, "text_3", wrap=True)
         f.widget(self.xempty)
+        f.line()
+        match = Button("Match Subtitles to the Folder", "dark", height=32, bold=False)
+        match.clicked.connect(self.win.match_subtitles)
+        f.widget(match)
         self._footer(f)
         f.refresh = self.refresh
         return f
