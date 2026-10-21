@@ -361,6 +361,9 @@ class MainWindow(QWidget):
         self._overlay_timer = QTimer(self, interval=80, timeout=self._overlay_tick)
         self._hide_timer = QTimer(self, singleShot=True, timeout=self._hide_overlays)
         self._cursor_timer = QTimer(self, singleShot=True, interval=2200, timeout=self._hide_cursor)
+        # Repeats the video surface's cursor for a moment after a rebuild (see _on_rebuilt).
+        self._cursor_settle = QTimer(self, interval=100, timeout=self._settle_cursor)
+        self._cursor_settle_left = 0
 
         self._wire_surfaces()
         self._wire_engine()
@@ -709,6 +712,31 @@ class MainWindow(QWidget):
 
     def _on_rebuilt(self):
         self.engine.set_window(int(self.video.winId()))
+        # The rebuild destroys the old libVLC video window while it sits under the pointer —
+        # the click that changed a video filter lands on the picture — and the new output
+        # window takes its place a moment later. Windows puts its wait cursor up each time a
+        # window appears or goes under a stationary pointer, and only replaces it when the
+        # pointer enters another window: it was left spinning until the pointer was moved off
+        # the picture. The new window is only up after this signal (on the test clip it was
+        # there some 200 ms later, and has_vout reported it later still), so the reset is
+        # repeated for a moment rather than done once here.
+        self._cursor_settle_left = 16               # 1.6 s at the timer's 100 ms
+        self._reset_video_cursor()
+        self._cursor_settle.start()
+
+    def _settle_cursor(self):
+        self._reset_video_cursor()
+        self._cursor_settle_left -= 1
+        if self._cursor_settle_left <= 0:
+            self._cursor_settle.stop()
+
+    def _reset_video_cursor(self):
+        # Qt tells Windows about a widget's cursor only when the value it keeps changes, so
+        # setting the arrow alone would be a no-op after the first time; setting it and then
+        # dropping back to the inherited cursor makes each call apply again. An override
+        # cursor (the pointer hidden over the fullscreen picture) still wins over this.
+        self.video.setCursor(Qt.ArrowCursor)
+        self.video.unsetCursor()
 
     def _on_library(self, what):
         if what in ("favorites", "bookmarks"):
